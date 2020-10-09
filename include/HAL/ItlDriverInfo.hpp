@@ -19,13 +19,17 @@ class ItlDriverInfo {
     
 public:
     
-    virtual char *getFirmwareVersion() = 0;
+    virtual const char *getFirmwareVersion() = 0;
     
     virtual int16_t getBSSNoise() = 0;
     
     virtual bool is5GBandSupport() = 0;
     
     virtual int getTxNSS() = 0;
+    
+    virtual const char *getFirmwareName() = 0;
+    
+    virtual UInt32 supportedFeatures() = 0;
 };
 
 #endif /* ItlDriverInfo_h */
