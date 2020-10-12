@@ -32,8 +32,7 @@ IOCommandGate *_fCommandGate;
 
 bool itlwm::init(OSDictionary *properties)
 {
-    super::init(properties);
-    return true;
+    return super::init(properties);
 }
 
 #define  PCI_MSI_FLAGS        2    /* Message Control */
@@ -402,7 +401,7 @@ void itlwm::watchdogAction(IOTimerEventSource *timer)
 {
     struct _ifnet *ifp = getIfp();
     (*ifp->if_watchdog)(ifp);
-    watchdogTimer->setTimeoutMS(1000);
+    watchdogTimer->setTimeoutMS(kWatchDogTimerPeriod);
 }
 
 const OSString * itlwm::newVendorString() const
@@ -513,7 +512,7 @@ IOReturn itlwm::enable(IONetworkInterface *netif)
     super::enable(netif);
     _fCommandGate->enable();
     fHalService->enable(netif);
-    watchdogTimer->setTimeoutMS(1000);
+    watchdogTimer->setTimeoutMS(kWatchDogTimerPeriod);
     watchdogTimer->enable();
     return kIOReturnSuccess;
 }

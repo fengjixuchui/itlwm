@@ -1,5 +1,3 @@
-/* add your code here */
-
 /*
 * Copyright (C) 2020  钟先耀
 *
@@ -38,6 +36,8 @@ enum
     kPowerStateOn,
     kPowerStateCount
 };
+
+#define kWatchDogTimerPeriod 1000
 
 class itlwm : public IOEthernetController {
     OSDeclareDefaultStructors(itlwm)

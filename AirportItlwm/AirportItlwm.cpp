@@ -1,7 +1,20 @@
-/* add your code here */
+/*
+* Copyright (C) 2020  钟先耀
+*
+* This program is free software; you can redistribute it and/or modify
+* it under the terms of the GNU General Public License as published by
+* the Free Software Foundation; either version 2 of the License, or
+* (at your option) any later version.
+*
+* This program is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+* GNU General Public License for more details.
+*/
 #include "AirportItlwm.hpp"
 
 #include "sha1.h"
+#include <net80211/ieee80211_priv.h>
 
 #define super IO80211Controller
 OSDefineMetaClassAndStructors(AirportItlwm, IO80211Controller);
@@ -12,8 +25,7 @@ IOCommandGate *_fCommandGate;
 
 bool AirportItlwm::init(OSDictionary *properties)
 {
-    super::init(properties);
-    return true;
+    return super::init(properties);
 }
 
 #define  PCI_MSI_FLAGS        2    /* Message Control */
@@ -144,14 +156,13 @@ void AirportItlwm::associateSSID(uint8_t *ssid, uint32_t ssid_len, const struct 
         ic->ic_flags &= ~IEEE80211_F_DESBSSID;
     }
     
-    if (authtype_upper & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA_PSK)) {
-        wpa.i_protos |= IEEE80211_WPA_PROTO_WPA1;		
-    }
-    if (authtype_upper & (APPLE80211_AUTHTYPE_WPA2 | APPLE80211_AUTHTYPE_WPA2_PSK)) {
-        wpa.i_protos |= IEEE80211_WPA_PROTO_WPA2;		
+    if (authtype_upper & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2 | APPLE80211_AUTHTYPE_WPA2_PSK)) {
+        XYLog("%s %d\n", __FUNCTION__, __LINE__);
+        wpa.i_protos = IEEE80211_WPA_PROTO_WPA1 | IEEE80211_WPA_PROTO_WPA2;
     }
     
     if (authtype_upper & (APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2_PSK)) {
+        XYLog("%s %d\n", __FUNCTION__, __LINE__);
         wpa.i_akms |= IEEE80211_WPA_AKM_PSK | IEEE80211_WPA_AKM_SHA256_PSK;
         wpa.i_enabled = 1;
         memcpy(ic->ic_psk, key, sizeof(ic->ic_psk));
@@ -159,6 +170,7 @@ void AirportItlwm::associateSSID(uint8_t *ssid, uint32_t ssid_len, const struct 
         ieee80211_ioctl_setwpaparms(ic, &wpa);
     }
     if (authtype_upper & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA2)) {
+        XYLog("%s %d\n", __FUNCTION__, __LINE__);
         wpa.i_akms |= IEEE80211_WPA_AKM_8021X | IEEE80211_WPA_AKM_SHA256_8021X;	
         wpa.i_enabled = 1;
         ieee80211_ioctl_setwpaparms(ic, &wpa);
@@ -171,6 +183,7 @@ void AirportItlwm::associateSSID(uint8_t *ssid, uint32_t ssid_len, const struct 
     
     if (authtype_upper == APPLE80211_AUTHTYPE_NONE && authtype_lower == APPLE80211_AUTHTYPE_OPEN) { // Open or WEP Open System
         if (key_len > 0) {
+            XYLog("%s %d\n", __FUNCTION__, __LINE__);
             nwkey.i_wepon = IEEE80211_NWKEY_WEP;
             nwkey.i_defkid = key_index + 1;
             nwkey.i_key[key_index].i_keylen = (int)key_len;
@@ -231,11 +244,6 @@ void AirportItlwm::setPTK(const u_int8_t *key, size_t key_len) {
               ic->ic_if.if_xname, ether_sprintf(ni->ni_macaddr));
 }
 
-#define LE_READ_6(p)                                    \
-((u_int64_t)(p)[5] << 40 | (u_int64_t)(p)[4] << 32 |    \
- (u_int64_t)(p)[3] << 24 | (u_int64_t)(p)[2] << 16 |    \
- (u_int64_t)(p)[1] <<  8 | (u_int64_t)(p)[0])
-
 void AirportItlwm::setGTK(const u_int8_t *gtk, size_t key_len, u_int8_t kid, u_int8_t *rsc) {
     struct ieee80211com *ic = fHalService->get80211Controller();
     struct ieee80211_node	* ni = ic->ic_bss;
@@ -251,22 +259,24 @@ void AirportItlwm::setGTK(const u_int8_t *gtk, size_t key_len, u_int8_t kid, u_i
         }
         /* map GTK to 802.11 key */
         k = &ic->ic_nw_keys[kid];
-        memset(k, 0, sizeof(*k));
-        k->k_id = kid;    /* 0-3 */
-        k->k_cipher = ni->ni_rsngroupcipher;
-        k->k_flags = IEEE80211_KEY_GROUP;
-        //if (gtk[6] & (1 << 2))
-        //  k->k_flags |= IEEE80211_KEY_TX;
-        k->k_rsc[0] = LE_READ_6(rsc);
-        k->k_len = keylen;
-        memcpy(k->k_key, gtk, k->k_len);
-        /* install the GTK */
-        if ((*ic->ic_set_key)(ic, ni, k) != 0) {
-            XYLog("setting GTK failed\n");
-            return;
-        }
-        else {
-            XYLog("setting GTK successfully\n");
+        if (k->k_cipher == IEEE80211_CIPHER_NONE || k->k_len != keylen || memcmp(k->k_key, gtk, keylen) != 0) {
+            memset(k, 0, sizeof(*k));
+            k->k_id = kid;    /* 0-3 */
+            k->k_cipher = ni->ni_rsngroupcipher;
+            k->k_flags = IEEE80211_KEY_GROUP;
+            //if (gtk[6] & (1 << 2))
+            //  k->k_flags |= IEEE80211_KEY_TX;
+            k->k_rsc[0] = LE_READ_6(rsc);
+            k->k_len = keylen;
+            memcpy(k->k_key, gtk, k->k_len);
+            /* install the GTK */
+            if ((*ic->ic_set_key)(ic, ni, k) != 0) {
+                XYLog("setting GTK failed\n");
+                return;
+            }
+            else {
+                XYLog("setting GTK successfully\n");
+            }
         }
     }
     
@@ -300,7 +310,7 @@ createMediumTables(const IONetworkMedium **primary)
         return false;
     }
     
-    medium = IONetworkMedium::medium(kIOMediumIEEE80211DS11, 11000000);
+    medium = IONetworkMedium::medium(0x80, 11000000);
     IONetworkMedium::addMedium(mediumDict, medium);
     medium->release();
     if (primary) {
@@ -412,7 +422,7 @@ void AirportItlwm::watchdogAction(IOTimerEventSource *timer)
 {
     struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
     (*ifp->if_watchdog)(ifp);
-    watchdogTimer->setTimeoutMS(1000);
+    watchdogTimer->setTimeoutMS(kWatchDogTimerPeriod);
 //    if (fNetIf != NULL && fHalService->get80211Controller()->ic_state == IEEE80211_S_RUN) {
 //        fNetIf->postMessage(39);
 //    }
@@ -489,17 +499,15 @@ void AirportItlwm::stop(IOService *provider)
     releaseAll();
 }
 
-UInt64 currentSpeed;
 UInt32 currentStatus;
 
 bool AirportItlwm::
 setLinkStatus(UInt32 status, const IONetworkMedium * activeMedium, UInt64 speed, OSData * data)
 {
-    if (status == currentStatus && activeMedium == getCurrentMedium() && speed == currentSpeed) {
+    if (status == currentStatus) {
         return true;
     }
     bool ret = super::setLinkStatus(status, activeMedium, speed, data);
-    currentSpeed = speed;
     currentStatus = status;
     if (fNetIf) {
         if (status & kIONetworkLinkActive) {
@@ -568,7 +576,7 @@ IOReturn AirportItlwm::enable(IONetworkInterface *netif)
     super::enable(netif);
     _fCommandGate->enable();
     fHalService->enable(netif);
-    watchdogTimer->setTimeoutMS(1000);
+    watchdogTimer->setTimeoutMS(kWatchDogTimerPeriod);
     watchdogTimer->enable();
     return kIOReturnSuccess;
 }

@@ -22,11 +22,17 @@
 #ifndef _APPLE80211_IOCTL_H_
 #define _APPLE80211_IOCTL_H_
 
+#include <Availability.h>
 #include <sys/socket.h>
 #include <net/if.h>
 #include <net/ethernet.h>
 #include <sys/param.h>
 #include <sys/ioctl.h>
+
+// This is necessary, because even the latest Xcode does not support properly targeting 11.0.
+#ifndef __IO80211_TARGET
+#error "Please define __IO80211_TARGET to the requested version"
+#endif
 
 #include "apple80211_var.h"
 
@@ -397,7 +403,7 @@ struct apple80211_bssid_data
 struct apple80211_capability_data
 {
     u_int32_t    version;
-    u_int8_t    capabilities[APPLE80211_MAP_SIZE( APPLE80211_CAP_MAX + 1 )];
+    u_int8_t    capabilities[11];
 };
 
 struct apple80211_state_data
@@ -541,6 +547,34 @@ struct apple80211_scan_data
     struct apple80211_channel    channels[APPLE80211_MAX_CHANNELS];    // channel list
 };
 
+struct apple80211_scan_multiple_data
+{
+  uint32_t                  version;
+  uint32_t                  ap_mode; // apple80211_apmode
+  uint32_t                  ssid_count;
+  apple80211_ssid_data      ssids[16];
+  uint32_t                  bssid_count;
+  ether_addr                bssids[16];
+  uint32_t                  scan_type;
+  uint32_t                  phy_mode;
+  uint32_t                  dwell_time;
+  uint32_t                  rest_time;
+  uint32_t                  num_channels;
+  struct apple80211_channel channels[128];
+  uint16_t                  unk_2;
+};
+
+struct apple80211_link_changed_event_data
+{
+   bool       isLinkDown; // 0
+   uint32_t   rssi;       // 4
+   uint16_t   snr;        // 8
+   uint16_t   nf;         // 10
+   char       cca;        // 12
+   bool       voluntary;  // 16
+   uint32_t   reason;     // 20
+};
+
 struct apple80211_apmode_data
 {
     u_int32_t    version;
@@ -557,7 +591,7 @@ struct apple80211_assoc_data
     u_int8_t                ad_ssid[ APPLE80211_MAX_SSID_LEN ];
     struct ether_addr        ad_bssid;        // prefer over ssid if not zeroed
     struct apple80211_key    ad_key;
-    u_int8_t                unknown[82];
+    uint16_t pad;
     u_int8_t                ad_rsn_ie[ APPLE80211_MAX_RSN_IE_LEN ];
     u_int32_t                ad_flags;        // apple80211_assoc_flags
 };

@@ -23,9 +23,15 @@
 #ifndef _APPLE80211_VAR_H_
 #define _APPLE80211_VAR_H_
 
+#include <Availability.h>
 #include <sys/types.h>
 #include <net/ethernet.h>
 #include <sys/param.h>
+
+// This is necessary, because even the latest Xcode does not support properly targeting 11.0.
+#ifndef __IO80211_TARGET
+#error "Please define __IO80211_TARGET to the requested version"
+#endif
 
 // Sizes and limits
 #define APPLE80211_ADDR_LEN            6
@@ -176,6 +182,14 @@ enum apple80211_associate_result
     APPLE80211_RESULT_UNKNOWN                    = 0xffff // Unrecognized error condition
 };
 
+enum apple80211_link_down_reason
+{
+   APPLE80211_LINK_DOWN_REASON_INTERNAL_ERROR   = 0,
+   APPLE80211_LINK_DOWN_REASON_BEACONLOST       = 1,
+   APPLE80211_LINK_DOWN_REASON_DEAUTH           = 2,
+   APPLE80211_LINK_DOWN_REASON_INTERNAL_ERROR_2 = 3
+};
+
 enum apple80211_unit
 {
     APPLE80211_UNIT_DBM        = 0,        // dBm
@@ -200,6 +214,7 @@ enum apple80211_locale
     APPLE80211_LOCALE_KOREA        = 4,
     APPLE80211_LOCALE_APAC        = 5,
     APPLE80211_LOCALE_ROW        = 6,
+    APPLE80211_LOCALE_INDONESIA  = 7
 };
 
 enum apple80211_scan_type
@@ -302,9 +317,14 @@ struct apple80211_key
     u_int16_t            key_flags;
     u_int16_t            key_index;
     u_int8_t            key[ APPLE80211_KEY_BUFF_LEN ];
+    u_int8_t pad[30];
     u_int32_t            key_rsc_len;
     u_int8_t            key_rsc[ APPLE80211_RSC_LEN ];    // receive sequence counter
     struct ether_addr    key_ea;                            // key applies to this bssid
+    uint wowl_kck_len;
+    uint8_t wowl_kck_key[16];
+    uint wowl_kek_len;
+    u_int8_t wowl_kek_key[24];
 };
 
 // Changing this affects any structure that contains a channel
