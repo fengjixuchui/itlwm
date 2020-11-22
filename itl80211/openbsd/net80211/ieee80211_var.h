@@ -228,8 +228,8 @@ static void array_sprintf(char *output, uint8_t output_size, const uint8_t *arra
 
 #define IEEE80211_RSSI_THRES_2GHZ		(-60)	/* in dBm */
 #define IEEE80211_RSSI_THRES_5GHZ		(-70)	/* in dBm */
-#define IEEE80211_RSSI_THRES_RATIO_2GHZ		60	/* in percent */
-#define IEEE80211_RSSI_THRES_RATIO_5GHZ		50	/* in percent */
+#define IEEE80211_RSSI_THRES_RATIO_2GHZ		50	/* in percent */
+#define IEEE80211_RSSI_THRES_RATIO_5GHZ		40	/* in percent */
 
 #define IEEE80211_BGSCAN_FAIL_MAX		360	/* units of 500 msec */
 
@@ -421,6 +421,7 @@ struct ieee80211com {
 	int			(*ic_bgscan_start)(struct ieee80211com *);
     /* The channel width has changed (20<->2040) */
     void            (*ic_update_chw)(struct ieee80211com *);
+    void            (*ic_event_handler)(struct ieee80211com *, int, void *);
 	CTimeout*		ic_bgscan_timeout;
 	uint32_t		ic_bgscan_fail;
 	u_int8_t		ic_myaddr[IEEE80211_ADDR_LEN];
@@ -481,9 +482,9 @@ struct ieee80211com {
 	u_int8_t		ic_des_bssid[IEEE80211_ADDR_LEN];
 #ifdef AIRPORT
 	u_int8_t		ic_rsn_ie_override[257];
+#endif
     u_int16_t       ic_deauth_reason;
     u_int16_t       ic_assoc_status;
-#endif
 	struct ieee80211_key	ic_nw_keys[IEEE80211_GROUP_NKID];
 	int			ic_def_txkey;	/* group data key index */
 #define ic_wep_txkey	ic_def_txkey
@@ -626,6 +627,11 @@ struct ieee80211_ess {
 #define	IEEE80211_F_DOFRATE	0x00000002	/* use fixed rate */
 #define	IEEE80211_F_DONEGO	0x00000004	/* calc negotiated rate */
 #define	IEEE80211_F_DODEL	0x00000008	/* delete ignore rate */
+
+#define IEEE80211_EVT_STA_ASSOC_DONE            1
+#define IEEE80211_EVT_STA_DEAUTH                2
+#define IEEE80211_EVT_COUNTRY_CODE_UPDATE       3
+#define IEEE80211_EVT_SCAN_DONE                 4
 
 void	ieee80211_ifattach(struct _ifnet *);
 void	ieee80211_ifdetach(struct _ifnet *);

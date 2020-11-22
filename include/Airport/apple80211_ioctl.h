@@ -53,6 +53,9 @@ struct apple80211req
 #define SIOCGA80211 3223873993
 #endif
 
+#define APPLE80211_AWDL_CAP_CCA_STATS   2
+#define APPLE80211_AWDL_CAP_SEC_PAYLOAD 0x100000000
+
 // req_type
 
 #define APPLE80211_IOC_SSID                     1    // req_type
@@ -349,7 +352,20 @@ struct apple80211req
 #define APPLE80211_IOC_SCAN_BACKOFF_REPORT 264
 #define APPLE80211_IOC_OFFLOAD_TCPKA_ENABLE 265
 #define APPLE80211_IOC_RANGING_CAPS 266
-#define APPLE80211_IOC_PER_CORE_RSSI_REPORT 267
+#define APPLE80211_IOC_SUPPRESS_SCANS 267
+#define APPLE80211_IOC_HOST_AP_MODE_HIDDEN 336
+#define APPLE80211_IOC_LQM_CONFIG 337
+#define APPLE80211_IOC_AWDL_CCA 338
+#define APPLE80211_IOC_TRAP_CRASHTRACER_MINI_DUMP 339
+#define APPLE80211_IOC_AWDL_SIDECAR_STATISTICS 340
+#define APPLE80211_IOC_AWDL_CAPABILITIES    341
+#define APPLE80211_IOC_LLW_PARAMS 344
+#define APPLE80211_IOC_HE_CAPABILITY        345
+#define APPLE80211_IOC_SOFTAP_PARAMS        347
+#define APPLE80211_IOC_SOFTAP_TRIGGER_CSA   349
+#define APPLE80211_IOC_SOFTAP_STATS         350
+#define APPLE80211_IOC_AWDL_SIDECAR_DIAGNOSTICS 351
+#define APPLE80211_IOC_SOFTAP_WIFI_NETWORK_INFO_IE  352
 #define APPLE80211_IOC_NSS  353
 
 #define APPLE80211_IOC_CARD_SPECIFIC            0xffffffff    // req_type
@@ -381,14 +397,25 @@ struct apple80211_virt_if_delete_data {
 
 struct apple80211_ht_capability {
     uint32_t    version;
-    uint8_t     unk1;
-    uint8_t     unk2;
-    uint16_t    unk3;
-    uint8_t     unk4;
-    uint8_t     unk5[16];
-    uint16_t    unk6;
-    uint        unk7;
-    uint8_t     unk8;
+    uint8_t     hc_id;              /* element ID */
+    uint8_t     hc_len;             /* length in bytes */
+    uint16_t    hc_cap;             /* HT caps (see below) */
+    uint8_t     hc_param;           /* HT params (see below) */
+    uint8_t     hc_mcsset[16];      /* supported MCS set */
+    uint16_t    hc_extcap;          /* extended HT capabilities */
+    uint32_t    hc_txbf;            /* txbf capabilities */
+    uint8_t     hc_antenna;         /* antenna capabilities */
+} __attribute__((packed));
+
+struct apple80211_vht_capability {
+    uint32_t    version;
+    uint16_t    cap;        // 4
+    uint32_t    unk1;       // 6
+    uint16_t    unk2;       // 10
+    uint16_t    unk3;       // 12
+    uint16_t    unk4;       // 14
+    uint16_t    unk5;       // 16
+    uint16_t    unk6;       // 18
 } __attribute__((packed));
 
 struct apple80211_channel_data
@@ -563,7 +590,7 @@ struct apple80211_scan_multiple_data
     uint32_t                  dwell_time;
     uint32_t                  rest_time;
     uint32_t                  num_channels;
-    struct apple80211_channel channels[128];
+    struct apple80211_channel channels[APPLE80211_MAX_CHANNELS];
     uint16_t                  unk_2;
 };
 
@@ -594,14 +621,15 @@ struct apple80211_assoc_data
     u_int8_t                 ad_ssid[ APPLE80211_MAX_SSID_LEN ];
     struct ether_addr        ad_bssid;         // prefer over ssid if not zeroed
     struct apple80211_key    ad_key;
-    uint16_t                 pad;
-    u_int8_t                 ad_rsn_ie[ APPLE80211_MAX_RSN_IE_LEN ];
+    uint16_t                 ad_rsn_ie_len;
+    u_int8_t                 ad_rsn_ie[ APPLE80211_MAX_RSN_IE_LEN + 1 ];
     u_int32_t                ad_flags;         // apple80211_assoc_flags
 };
 
 static_assert(offsetof(apple80211_assoc_data, ad_key) == 0x38, "aaaa");
 
 static_assert(offsetof(apple80211_assoc_data, ad_rsn_ie) == 206, "offsetof(apple80211_assoc_data, ad_rsn_ie)");
+static_assert(offsetof(apple80211_assoc_data, ad_flags) == 464, "ad_flags offset error");
 
 struct apple80211_deauth_data
 {
@@ -851,6 +879,194 @@ struct apple80211_awdl_sync_frame_template
     uint32_t    version;
     uint32_t    payload_len;
     void        *payload;
+} __attribute__((packed));
+
+struct apple80211_awdl_bssid {
+    uint32_t    version;
+    uint8_t     bssid[APPLE80211_ADDR_LEN];
+    uint8_t     unk_mac[APPLE80211_ADDR_LEN];
+} __attribute__((packed));
+
+struct apple80211_awdl_channel {
+    uint16_t    chan_spec;
+    uint8_t     chan_num;
+    uint8_t     indoor_restric;
+    uint8_t     radar_dfs;
+    uint8_t     passive;
+    uint8_t     support_40Mhz;
+    uint8_t     support_80Mhz;
+    uint8_t     z;
+    uint32_t    per_chan;
+    uint32_t    chan_bitmap;
+} __attribute__((packed));
+
+struct apple80211_channels_info {
+    uint32_t    version;
+    uint32_t    unk1;
+    uint16_t    num_chan_specs;
+    struct apple80211_awdl_channel channels[APPLE80211_MAX_CHANNELS];
+} __attribute__((packed));
+
+struct apple80211_peer_cache_maximum_size {
+    uint32_t    version;
+    uint32_t    max_peers;
+} __attribute__((packed));
+
+struct apple80211_awdl_election_id {
+    uint32_t    version;
+    uint32_t    election_id;
+} __attribute__((packed));
+
+struct apple80211_awdl_master_channel {
+    uint32_t    version;
+    uint32_t    master_channel;
+} __attribute__((packed));
+
+struct apple80211_awdl_secondary_master_channel {
+    uint32_t    version;
+    uint32_t    secondary_master_channel;
+} __attribute__((packed));
+
+struct apple80211_awdl_min_rate {
+    uint32_t    version;
+    uint8_t    min_rate;
+} __attribute__((packed));
+
+struct apple80211_awdl_election_rssi_thresholds {
+    uint32_t    version;
+    uint32_t    unk1;
+    uint32_t    unk2;
+    uint32_t    unk3;
+} __attribute__((packed));
+
+struct apple80211_channel_sequence {
+    uint16_t    flags;
+    uint8_t     pad;
+} __attribute__((packed));
+
+struct apple80211_awdl_sync_channel_sequence {
+    uint32_t    version;
+    uint8_t     pad1;
+    uint8_t     length;             // 5
+    uint8_t     encoding;           // 6
+    uint8_t     step_count;         // 7
+    uint8_t     duplicate_count;    // 8
+    uint8_t     fill_channel;       // 9
+    uint8_t     pad2[6];
+    struct apple80211_channel_sequence seqs[APPLE80211_MAX_CHANNELS];
+} __attribute__((packed));
+
+static_assert(__offsetof(apple80211_awdl_sync_channel_sequence, seqs) == 16, "seqs offset error");
+
+static_assert(sizeof(struct apple80211_awdl_sync_channel_sequence) == 0x190, "apple80211_awdl_sync_channel_sequence struct corrupt");
+
+struct apple80211_awdl_presence_mode {
+    uint32_t    version;
+    uint32_t    mode;
+} __attribute__((packed));
+
+struct apple80211_awdl_extension_state_machine_parameter {
+    uint32_t    version;
+    uint32_t    unk1;
+    uint32_t    unk2;
+    uint32_t    unk3;
+    uint32_t    unk4;
+} __attribute__((packed));
+
+struct apple80211_awdl_sync_state {
+    uint32_t    version;
+    uint32_t    state;
+} __attribute__((packed));
+
+struct apple80211_awdl_sync_params {
+    uint32_t    version;
+    uint32_t    availability_window_length;
+    uint32_t    availability_window_period;
+    uint32_t    extension_length;
+    uint32_t    synchronization_frame_period;
+} __attribute__((packed));
+
+struct apple80211_awdl_cap {
+    uint32_t    version;
+    uint8_t     cap;
+} __attribute__((packed));
+
+struct apple80211_awdl_af_tx_mode {
+    uint32_t    version;
+    uint64_t    mode;
+} __attribute__((packed));
+
+#define AWDL_OOB_AF_PARAMS_SIZE 38
+
+struct apple80211_awdl_oob_request {
+    uint32_t    version;
+    uint32_t    unk1;               // 4
+    uint32_t    unk2;               // 8
+    uint32_t    unk3;               // 12
+    uint32_t    unk4;               // 16
+    uint16_t    pad1;
+    uint32_t    unk5;               // 22
+    uint16_t    unk6;               // 26
+    uint32_t    pad2;
+    uint32_t    unk7;               // 32
+    uint32_t    pad3;
+    uint16_t    data_len;           // 40
+    uint32_t    pad4;
+    uint16_t    unk9;               // 44
+    uint8_t     data[1782];         // 48
+} __attribute__((packed));
+
+struct apple80211_roam_profile {
+    uint8_t     unk1;
+    uint8_t     unk2;
+    uint8_t     unk3;
+    uint8_t     unk4;
+    uint8_t     unk5;
+    uint8_t     unk6;
+    uint16_t    unk7;
+    uint16_t    unk8;
+    uint16_t    unk9;
+    uint16_t    unk10;
+    uint16_t    unk11;
+} __attribute__((packed));
+
+struct apple80211_roam_profile_band_data {
+    uint32_t    version;
+    uint32_t    flags;          // 4 (0x2, 0x4)
+    uint32_t    profile_cnt;    // 8
+    struct apple80211_roam_profile profiles[4];
+} __attribute__((packed));
+
+static_assert(sizeof(struct apple80211_roam_profile_band_data) == 76, "roam data size error");
+
+struct apple80211_ie_data {
+    uint32_t    version;
+    uint32_t    frame_type_flags;   // 4
+    uint32_t    add;                // 8
+    uint32_t    signature_len;      // 12
+    uint32_t    ie_len;             // 16
+    uint32_t    pad1;               // 20
+    uint8_t     ie[2048];
+} __attribute__((packed));
+
+struct apple80211_p2p_listen_data {
+    uint32_t    version;
+    uint32_t    pad1;
+    uint32_t    channel;        // 8
+    uint32_t    flags;          // 12
+    uint32_t    duration;       // 16
+} __attribute__((packed));
+
+struct apple80211_p2p_go_conf_data {
+    uint32_t    version;
+    uint32_t    auth_upper;     // 4 should equal to 1
+    uint32_t    auth_lower;     // 6 should non zero
+    void        *dynbcn;        // 8
+    uint32_t    channel;        // 12
+    uint32_t    bcn_len;        // 16
+    uint32_t    ssid_len;       // 20
+    uint8_t     ssid[32];       // 24
+    uint32_t    suppress_beacon;// 56 security:1,4
 } __attribute__((packed));
 
 #endif // _APPLE80211_IOCTL_H_

@@ -1461,6 +1461,7 @@ iwm_deauth(struct iwm_softc *sc)
             return err;
         }
         sc->sc_flags &= ~IWM_FLAG_STA_ACTIVE;
+        sc->sc_rx_ba_sessions = 0;
     }
     
     tfd_queue_msk = 0;
@@ -1540,6 +1541,7 @@ iwm_disassoc(struct iwm_softc *sc)
             return err;
         }
         sc->sc_flags &= ~IWM_FLAG_STA_ACTIVE;
+        sc->sc_rx_ba_sessions = 0;
     }
     
     return 0;
@@ -2097,6 +2099,12 @@ iwm_newstate_task(void *psc)
         splx(s);
         return;
     }
+
+    if ((ostate == nstate) && (nstate == IEEE80211_S_AUTH || nstate == IEEE80211_S_ASSOC)) {
+        XYLog("%s duplicate state %d\n", __FUNCTION__, nstate);
+        splx(s);
+        return;
+    }
     
     if (ostate == IEEE80211_S_SCAN) {
         if (nstate == ostate) {
@@ -2163,7 +2171,6 @@ iwm_newstate_task(void *psc)
             break;
             
         case IEEE80211_S_ASSOC:
-            sc->sc_rx_ba_sessions = 0;
             err = that->iwm_assoc(sc);
             break;
             
@@ -2726,6 +2733,8 @@ iwm_stop(struct _ifnet *ifp)
     sc->sc_flags &= ~IWM_FLAG_TE_ACTIVE;
     sc->sc_flags &= ~IWM_FLAG_HW_ERR;
     sc->sc_flags &= ~IWM_FLAG_SHUTDOWN;
+
+    sc->sc_rx_ba_sessions = 0;
     
     sc->sc_newstate(ic, IEEE80211_S_INIT, -1);
     
@@ -3833,7 +3842,7 @@ iwm_attach(struct iwm_softc *sc, struct pci_attach_args *pa)
     ic->ic_max_rssi = IWM_MAX_DBM - IWM_MIN_DBM;
     
     ifp->controller = getController();
-    ifp->if_snd = IOPacketQueue::withCapacity(4096);
+    ifp->if_snd = IOPacketQueue::withCapacity(getTxQueueSize());
     ifp->if_softc = sc;
     ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST | IFF_DEBUG;
     ifp->if_ioctl = iwm_ioctl;

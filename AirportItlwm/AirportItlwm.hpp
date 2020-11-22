@@ -24,6 +24,7 @@
 
 #include "ItlIwm.hpp"
 #include "ItlIwx.hpp"
+#include "ItlIwn.hpp"
 
 #include "AirportItlwmInterface.hpp"
 
@@ -86,6 +87,9 @@ public:
                                const IONetworkMedium * activeMedium = 0,
                                UInt64                  speed        = 0,
                                OSData *                data         = 0) override;
+#ifdef __PRIVATE_SPI__
+    virtual IOReturn outputStart(IONetworkInterface *interface, IOOptionBits options) override;
+#endif
     
     void releaseAll();
     void associateSSID(uint8_t *ssid, uint32_t ssid_len, const struct ether_addr &bssid, uint32_t authtype_lower, uint32_t authtype_upper, uint8_t *key, uint32_t key_len, int key_index);
@@ -94,6 +98,7 @@ public:
     void watchdogAction(IOTimerEventSource *timer);
     bool initPCIPowerManagment(IOPCIDevice *provider);
     static IOReturn tsleepHandler(OSObject* owner, void* arg0 = 0, void* arg1 = 0, void* arg2 = 0, void* arg3 = 0);
+    static void eventHandler(struct ieee80211com *, int, void *);
     
     //IO80211
     virtual IOReturn getHardwareAddressForInterface(IO80211Interface* netif,
@@ -107,7 +112,6 @@ public:
     //authentication
     virtual bool useAppleRSNSupplicant(IO80211Interface *interface) override;
     virtual int outputRaw80211Packet(IO80211Interface *interface, mbuf_t m) override;
-    virtual int outputActionFrame(IO80211Interface *interface, mbuf_t m) override;
     //virtual interface
     virtual SInt32 enableVirtualInterface(IO80211VirtualInterface *interface) override;
     virtual SInt32 disableVirtualInterface(IO80211VirtualInterface *interface) override;
@@ -117,6 +121,12 @@ public:
     virtual UInt32 hardwareOutputQueueDepth(IO80211Interface* interface) override;
     virtual SInt32 performCountryCodeOperation(IO80211Interface* interface, IO80211CountryCodeOp op) override;
     virtual SInt32 enableFeature(IO80211FeatureCode code, void* data) override;
+    virtual void requestPacketTx(void*, UInt) override;
+    virtual int bpfOutputPacket(OSObject *,UInt,mbuf_t) override;
+    int outputActionFrame(OSObject *, mbuf_t m);
+    int bpfOutput80211Radio(OSObject *, mbuf_t m);
+    
+    
     
     //AirportSTAIOCTL
     FUNC_IOCTL(SSID, apple80211_ssid_data)
@@ -171,6 +181,31 @@ public:
     FUNC_IOCTL(SYNC_ENABLED, apple80211_awdl_sync_enabled)
     FUNC_IOCTL(SYNC_FRAME_TEMPLATE, apple80211_awdl_sync_frame_template)
     FUNC_IOCTL_GET(AWDL_HT_CAPABILITY, apple80211_ht_capability)
+    FUNC_IOCTL_GET(AWDL_VHT_CAPABILITY, apple80211_vht_capability)
+    
+    //AWDL
+    FUNC_IOCTL(AWDL_BSSID, apple80211_awdl_bssid)
+    FUNC_IOCTL_GET(CHANNELS_INFO, apple80211_channels_info)
+    FUNC_IOCTL(PEER_CACHE_MAXIMUM_SIZE, apple80211_peer_cache_maximum_size)
+    FUNC_IOCTL(AWDL_ELECTION_ID, apple80211_awdl_election_id)
+    FUNC_IOCTL(AWDL_MASTER_CHANNEL, apple80211_awdl_master_channel)
+    FUNC_IOCTL(AWDL_SECONDARY_MASTER_CHANNEL, apple80211_awdl_secondary_master_channel)
+    FUNC_IOCTL(AWDL_MIN_RATE, apple80211_awdl_min_rate)
+    FUNC_IOCTL(AWDL_ELECTION_RSSI_THRESHOLDS, apple80211_awdl_election_rssi_thresholds)
+    FUNC_IOCTL(AWDL_SYNCHRONIZATION_CHANNEL_SEQUENCE, apple80211_awdl_sync_channel_sequence)
+    FUNC_IOCTL(AWDL_PRESENCE_MODE, apple80211_awdl_presence_mode)
+    FUNC_IOCTL(AWDL_EXTENSION_STATE_MACHINE_PARAMETERS, apple80211_awdl_extension_state_machine_parameter)
+    FUNC_IOCTL(AWDL_SYNC_STATE, apple80211_awdl_sync_state)
+    FUNC_IOCTL(AWDL_SYNC_PARAMS, apple80211_awdl_sync_params)
+    FUNC_IOCTL_GET(AWDL_CAPABILITIES, apple80211_awdl_cap)
+    FUNC_IOCTL(AWDL_AF_TX_MODE, apple80211_awdl_af_tx_mode)
+    FUNC_IOCTL_SET(AWDL_OOB_AUTO_REQUEST, apple80211_awdl_oob_request)
+    FUNC_IOCTL(ROAM_PROFILE, apple80211_roam_profile_band_data)
+    FUNC_IOCTL(WOW_PARAMETERS, apple80211_wow_parameter_data)
+    FUNC_IOCTL(IE, apple80211_ie_data)
+    FUNC_IOCTL_SET(P2P_SCAN, apple80211_scan_data)
+    FUNC_IOCTL_SET(P2P_LISTEN, apple80211_p2p_listen_data)
+    FUNC_IOCTL_SET(P2P_GO_CONF, apple80211_p2p_go_conf_data)
     
     
     //-----------------------------------------------------------------------
@@ -226,4 +261,12 @@ public:
     //AWDL
     uint8_t *syncFrameTemplate;
     uint32_t syncFrameTemplateLength;
+    uint8_t awdlBSSID[6];
+    uint32_t awdlSyncState;
+    uint32_t awdlElectionId;
+    uint32_t awdlPresenceMode;
+    uint16_t awdlMasterChannel;
+    uint16_t awdlSecondaryMasterChannel;
+    uint8_t *roamProfile;
+    bool awdlSyncEnable;
 };

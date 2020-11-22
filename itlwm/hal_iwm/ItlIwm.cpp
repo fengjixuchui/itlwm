@@ -136,6 +136,18 @@ supportedFeatures()
     return 0;
 }
 
+const char *ItlIwm::
+getFirmwareCountryCode()
+{
+    return com.sc_fw_mcc;
+}
+
+uint32_t ItlIwm::
+getTxQueueSize()
+{
+    return IWM_TX_RING_COUNT;
+}
+
 int16_t ItlIwm::
 getBSSNoise()
 {

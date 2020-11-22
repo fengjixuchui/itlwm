@@ -241,6 +241,18 @@ supportedFeatures()
     return 0;
 }
 
+const char *ItlIwx::
+getFirmwareCountryCode()
+{
+    return com.sc_fw_mcc;
+}
+
+uint32_t ItlIwx::
+getTxQueueSize()
+{
+    return IWX_TX_RING_COUNT;
+}
+
 int16_t ItlIwx::
 getBSSNoise()
 {
@@ -933,6 +945,8 @@ iwx_read_firmware(struct iwx_softc *sc)
     sc->sc_capaflags = 0;
     sc->sc_capa_n_scan_channels = IWX_DEFAULT_SCAN_CHANNELS;
     memset(sc->sc_enabled_capa, 0, sizeof(sc->sc_enabled_capa));
+    memcpy(sc->sc_fw_mcc, "ZZ", sizeof(sc->sc_fw_mcc));
+    sc->sc_fw_mcc_int = 0x3030;
     
     uhdr = (struct iwx_tlv_ucode_header *)fw->fw_rawdata;
     if (*(uint32_t *)fw->fw_rawdata != 0
@@ -2959,8 +2973,8 @@ iwx_load_firmware(struct iwx_softc *sc)
 {
     XYLog("%s\n", __FUNCTION__);
     struct iwx_fw_sects *fws;
-    int err, w;
-    
+    int err/*, w*/;
+
     sc->sc_uc.uc_intr = 0;
     
     fws = &sc->sc_fw.fw_sects[IWX_UCODE_TYPE_REGULAR];
@@ -2971,9 +2985,10 @@ iwx_load_firmware(struct iwx_softc *sc)
     }
     
     /* wait for the firmware to load */
-    for (w = 0; !sc->sc_uc.uc_intr && w < 10; w++) {
-        err = tsleep_nsec(&sc->sc_uc, 0, "iwxuc", MSEC_TO_NSEC(100));
-    }
+//    for (w = 0; !sc->sc_uc.uc_intr && w < 10; w++) {
+//        err = tsleep_nsec(&sc->sc_uc, 0, "iwxuc", MSEC_TO_NSEC(100));
+//    }
+    err = tsleep_nsec(&sc->sc_uc, 0, "iwxuc", SEC_TO_NSEC(1));
     if (err || !sc->sc_uc.uc_ok)
         XYLog("%s: could not load firmware\n", DEVNAME(sc));
     
@@ -3116,11 +3131,15 @@ iwx_run_init_mvm_ucode(struct iwx_softc *sc, int readnvm)
         return err;
 
     /* Wait for the init complete notification from the firmware. */
-    while ((sc->sc_init_complete & wait_flags) != wait_flags) {
-        err = tsleep_nsec(&sc->sc_init_complete, 0, "iwxinit",
-            SEC_TO_NSEC(2));
-        if (err)
-            return err;
+//    while ((sc->sc_init_complete & wait_flags) != wait_flags) {
+//        err = tsleep_nsec(&sc->sc_init_complete, 0, "iwxinit",
+//            SEC_TO_NSEC(2));
+//        if (err)
+//            return err;
+//    }
+    err = tsleep_nsec(&sc->sc_init_complete, 0, "iwxinit", SEC_TO_NSEC(2));
+    if (err) {
+        return err;
     }
 
     if (readnvm) {
@@ -5058,15 +5077,18 @@ iwx_mcc_update(struct iwx_softc *sc, struct iwx_mcc_chub_notif *notif)
 {
    struct ieee80211com *ic = &sc->sc_ic;
    struct _ifnet *ifp = IC2IFP(ic);
-   char alpha2[3];
 
-   snprintf(alpha2, sizeof(alpha2), "%c%c",
-       (le16toh(notif->mcc) & 0xff00) >> 8, le16toh(notif->mcc) & 0xff);
+    snprintf(sc->sc_fw_mcc, sizeof(sc->sc_fw_mcc), "%c%c",
+             (le16toh(notif->mcc) & 0xff00) >> 8, le16toh(notif->mcc) & 0xff);
+    if (sc->sc_fw_mcc_int != notif->mcc && sc->sc_ic.ic_event_handler) {
+        (*sc->sc_ic.ic_event_handler)(&sc->sc_ic, IEEE80211_EVT_COUNTRY_CODE_UPDATE, NULL);
+    }
+    sc->sc_fw_mcc_int = notif->mcc;
 
-   if (ifp->if_flags & IFF_DEBUG) {
-       printf("%s: firmware has detected regulatory domain '%s' "
-           "(0x%x)\n", DEVNAME(sc), alpha2, le16toh(notif->mcc));
-   }
+    if (ifp->if_flags & IFF_DEBUG) {
+        DPRINTF(("%s: firmware has detected regulatory domain '%s' "
+               "(0x%x)\n", DEVNAME(sc), sc->sc_fw_mcc, le16toh(notif->mcc)));
+    }
 
    /* TODO: Schedule a task to send MCC_UPDATE_CMD? */
 }
@@ -5200,7 +5222,10 @@ iwx_mac_ctxt_cmd_common(struct iwx_softc *sc, struct iwx_node *in,
     cmd->id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(in->in_id,
                                                         in->in_color));
     cmd->action = htole32(action);
-    
+
+    if (action == IWX_FW_CTXT_ACTION_REMOVE)
+        return;
+
     if (ic->ic_opmode == IEEE80211_M_MONITOR)
         cmd->mac_type = htole32(IWX_FW_MAC_TYPE_LISTENER);
     else if (ic->ic_opmode == IEEE80211_M_STA)
@@ -5319,7 +5344,12 @@ iwx_mac_ctxt_cmd(struct iwx_softc *sc, struct iwx_node *in, uint32_t action,
     memset(&cmd, 0, sizeof(cmd));
     
     iwx_mac_ctxt_cmd_common(sc, in, &cmd, action);
-    
+
+    if (action == IWX_FW_CTXT_ACTION_REMOVE) {
+        return iwx_send_cmd_pdu(sc, IWX_MAC_CONTEXT_CMD, 0,
+                                sizeof(cmd), &cmd);
+    }
+
     if (ic->ic_opmode == IEEE80211_M_MONITOR) {
         cmd.filter_flags |= htole32(IWX_MAC_FILTER_IN_PROMISC |
                                     IWX_MAC_FILTER_IN_CONTROL_AND_MGMT |
@@ -5798,6 +5828,7 @@ iwx_deauth(struct iwx_softc *sc)
             return err;
         }
         sc->sc_flags &= ~IWX_FLAG_STA_ACTIVE;
+        sc->sc_rx_ba_sessions = 0;
     }
     
     if (sc->sc_flags & IWX_FLAG_BINDING_ACTIVE) {
@@ -5880,8 +5911,6 @@ iwx_disassoc(struct iwx_softc *sc)
         cmd.station_flags_msk = htole32(IWX_STA_FLG_DRAIN_FLOW);
         err = iwx_send_cmd_pdu_status(sc, IWX_ADD_STA, sizeof(cmd), &cmd,
                                       &status);
-//        for (qid = 0; qid < nitems(sc->txq); qid++)
-//            iwx_reset_tx_ring(sc, &sc->txq[qid]);
         err = iwx_rm_sta_cmd(sc, in);
         if (err) {
             XYLog("%s: could not remove STA (error %d)\n",
@@ -5889,6 +5918,7 @@ iwx_disassoc(struct iwx_softc *sc)
             return err;
         }
         sc->sc_flags &= ~IWX_FLAG_STA_ACTIVE;
+        sc->sc_rx_ba_sessions = 0;
     }
     
     return 0;
@@ -6163,6 +6193,12 @@ iwx_newstate_task(void *psc)
     if (sc->sc_flags & IWX_FLAG_SHUTDOWN) {
         /* iwx_stop() is waiting for us. */
         //        refcnt_rele_wake(&sc->task_refs);
+        splx(s);
+        return;
+    }
+
+    if ((ostate == nstate) && (nstate == IEEE80211_S_AUTH || nstate == IEEE80211_S_ASSOC)) {
+        XYLog("%s duplicate state %d\n", __FUNCTION__, nstate);
         splx(s);
         return;
     }
@@ -6516,10 +6552,10 @@ iwx_send_update_mcc_cmd(struct iwx_softc *sc, const char *alpha2)
         err = EIO;
         goto out;
     }
-    
+
     DPRINTF(("MCC status=0x%x mcc=0x%x cap=0x%x time=0x%x geo_info=0x%x source_id=0x%d n_channels=%u\n",
              resp->status, resp->mcc, resp->cap, resp->time, resp->geo_info, resp->source_id, resp->n_channels));
-    
+
     /* Update channel map for net80211 and our scan configuration. */
     iwx_init_channel_map(sc, NULL, resp->channels, resp->n_channels);
     
@@ -6884,6 +6920,8 @@ iwx_stop(struct _ifnet *ifp)
     sc->sc_flags &= ~IWX_FLAG_TE_ACTIVE;
     sc->sc_flags &= ~IWX_FLAG_HW_ERR;
     sc->sc_flags &= ~IWX_FLAG_SHUTDOWN;
+
+    sc->sc_rx_ba_sessions = 0;
     
     sc->sc_newstate(ic, IEEE80211_S_INIT, -1);
     
@@ -7353,7 +7391,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
             case IWX_ALIVE: {
                 struct iwx_alive_resp_v4 *resp4;
                 
-                DPRINTF(("%s: firmware alive\n", __func__));
+//                DPRINTF(("%s: firmware alive, size=%d\n", __FUNCTION__, iwx_rx_packet_payload_len(pkt)));
                 if (iwx_rx_packet_payload_len(pkt) == sizeof(*resp4)) {
                     SYNC_RESP_STRUCT(resp4, pkt, struct iwx_alive_resp_v4 *);
                     sc->sc_uc.uc_lmac_error_event_table[0] = le32toh(
@@ -7511,7 +7549,6 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                  * messages. Just ignore them for now.
                  */
             case IWX_DEBUG_LOG_MSG:
-                XYLog("%s, pkt_len=%d\n", (char*)pkt->data, iwx_rx_packet_len(pkt));
                 break;
                 
             case IWX_MCAST_FILTER_CMD:
@@ -8798,7 +8835,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
     ic->ic_max_rssi = IWX_MAX_DBM - IWX_MIN_DBM;
     
     ifp->controller = getController();
-    ifp->if_snd = IOPacketQueue::withCapacity(4096);
+    ifp->if_snd = IOPacketQueue::withCapacity(getTxQueueSize());
     ifp->if_softc = sc;
     ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST | IFF_DEBUG;
     ifp->if_ioctl = iwx_ioctl;

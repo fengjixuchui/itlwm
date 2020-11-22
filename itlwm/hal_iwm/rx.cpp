@@ -668,7 +668,9 @@ iwm_rx_pkt(struct iwm_softc *sc, struct iwm_rx_data *data, struct mbuf_list *ml)
                 struct iwm_alive_resp_v1 *resp1;
                 struct iwm_alive_resp_v2 *resp2;
                 struct iwm_alive_resp_v3 *resp3;
-                
+
+//                XYLog("%s: firmware alive, size=%d\n", __FUNCTION__, iwm_rx_packet_payload_len(pkt));
+
                 if (iwm_rx_packet_payload_len(pkt) == sizeof(*resp1)) {
                     SYNC_RESP_STRUCT(resp1, pkt, struct iwm_alive_resp_v1 *);
                     sc->sc_uc.uc_error_event_table
@@ -741,6 +743,12 @@ iwm_rx_pkt(struct iwm_softc *sc, struct iwm_rx_data *data, struct mbuf_list *ml)
                 sc->sc_fw_mcc[0] = (notif->mcc & 0xff00) >> 8;
                 sc->sc_fw_mcc[1] = notif->mcc & 0xff;
                 sc->sc_fw_mcc[2] = '\0';
+
+                if (sc->sc_fw_mcc_int != notif->mcc && sc->sc_ic.ic_event_handler) {
+                    (*sc->sc_ic.ic_event_handler)(&sc->sc_ic, IEEE80211_EVT_COUNTRY_CODE_UPDATE, NULL);
+                }
+
+                sc->sc_fw_mcc_int = notif->mcc;
             }
                 
             case IWM_DTS_MEASUREMENT_NOTIFICATION:

@@ -81,14 +81,18 @@ IOService* itlwm::probe(IOService *provider, SInt32 *score)
         isMatch = true;
         fHalService = new ItlIwm;
     }
+    if (!isMatch && ItlIwn::iwn_match(device)) {
+        isMatch = true;
+        fHalService = new ItlIwn;
+    }
     if (isMatch) {
-        device->findPCICapability(PCI_CAP_ID_MSI, &msiCap);
-        if (msiCap) {
-            pciMsiSetEnable(device, msiCap, 0);
-        }
         device->findPCICapability(PCI_CAP_ID_MSIX, &msixCap);
         if (msixCap) {
             pciMsiXClearAndSet(device, msixCap, PCI_MSIX_FLAGS_ENABLE, 0);
+        }
+        device->findPCICapability(PCI_CAP_ID_MSI, &msiCap);
+        if (msiCap) {
+            pciMsiSetEnable(device, msiCap, 1);
         }
         if (!msiCap && !msixCap) {
             XYLog("%s No MSI cap\n", __FUNCTION__);
@@ -117,6 +121,9 @@ bool itlwm::configureInterface(IONetworkInterface *netif) {
     fHalService->get80211Controller()->ic_ac.ac_if.netStat = fpNetStats;
     fHalService->get80211Controller()->ic_ac.ac_if.iface = OSDynamicCast(IOEthernetInterface, netif);
     fpNetStats->collisions = 0;
+#ifdef __PRIVATE_SPI__
+    netif->configureOutputPullModel(fHalService->getDriverInfo()->getTxQueueSize(), 0, 0, IOEthernetInterface::kOutputPacketSchedulingModelNormal, 0);
+#endif
     
     return true;
 }
@@ -536,6 +543,30 @@ IOReturn itlwm::disable(IONetworkInterface *netif)
     return kIOReturnSuccess;
 }
 
+bool itlwm::
+setLinkStatus(UInt32 status, const IONetworkMedium * activeMedium, UInt64 speed, OSData * data)
+{
+    _ifnet *ifq = &fHalService->get80211Controller()->ic_ac.ac_if;
+    bool ret = super::setLinkStatus(status, activeMedium, speed, data);
+    if (fNetIf) {
+        if (status & kIONetworkLinkActive) {
+#ifdef __PRIVATE_SPI__
+            fNetIf->startOutputThread();
+#endif
+            ifq_set_oactive(&ifq->if_snd);
+        } else if (!(status & kIONetworkLinkNoNetworkChange)) {
+#ifdef __PRIVATE_SPI__
+            fNetIf->stopOutputThread();
+            fNetIf->flushOutputQueue();
+#endif
+            ifq->if_snd->lockFlush();
+            mq_purge(&fHalService->get80211Controller()->ic_mgtq);
+            ifq_clr_oactive(&ifq->if_snd);
+        }
+    }
+    return ret;
+}
+
 IOReturn itlwm::getHardwareAddress(IOEthernetAddress *addrP) {
     if (IEEE80211_ADDR_EQ(etheranyaddr, fHalService->get80211Controller()->ic_myaddr)) {
         return kIOReturnError;
@@ -544,6 +575,24 @@ IOReturn itlwm::getHardwareAddress(IOEthernetAddress *addrP) {
         return kIOReturnSuccess;
     }
 }
+
+#ifdef __PRIVATE_SPI__
+IOReturn itlwm::outputStart(IONetworkInterface *interface, IOOptionBits options)
+{
+    _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
+    mbuf_t m = NULL;
+    if (!ifq_is_oactive(&ifp->if_snd)) {
+        return kIOReturnNoResources;
+    }
+    while (kIOReturnSuccess == interface->dequeueOutputPackets(1, &m)) {
+        outputPacket(m, NULL);
+        if (!ifq_is_oactive(&ifp->if_snd)) {
+            return kIOReturnNoResources;
+        }
+    }
+    return kIOReturnNoResources;
+}
+#endif
 
 UInt32 itlwm::outputPacket(mbuf_t m, void *param)
 {
