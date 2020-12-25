@@ -13,7 +13,7 @@
 */
 #include "AirportItlwm.hpp"
 
-#include "sha1.h"
+#include <crypto/sha1.h>
 #include <net80211/ieee80211_priv.h>
 #include <net80211/ieee80211_var.h>
 
@@ -28,6 +28,7 @@ bool AirportItlwm::init(OSDictionary *properties)
 {
     bool ret = super::init(properties);
     awdlSyncEnable = true;
+    power_state = 0;
     return ret;
 }
 
@@ -166,19 +167,19 @@ void AirportItlwm::associateSSID(uint8_t *ssid, uint32_t ssid_len, const struct 
         ic->ic_flags &= ~IEEE80211_F_DESBSSID;
     }
     
-    if (authtype_upper & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2 | APPLE80211_AUTHTYPE_WPA2_PSK)) {
+    if (authtype_upper & (APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2 | APPLE80211_AUTHTYPE_WPA2_PSK | APPLE80211_AUTHTYPE_SHA256_PSK | APPLE80211_AUTHTYPE_SHA256_8021X)) {
         XYLog("%s %d\n", __FUNCTION__, __LINE__);
         wpa.i_protos = IEEE80211_WPA_PROTO_WPA1 | IEEE80211_WPA_PROTO_WPA2;
     }
 
     // AUTHTYPE_WPA3_SAE AUTHTYPE_WPA3_FT_SAE
     // we don't really support WPA3, but we have announced we support WPA3 in card capability function. so we fake it as WPA2 to support some WPA2/WPA3 mix wifi connection.
-    if (authtype_upper == 0x1000 || authtype_upper == 0x2000) {
+    if (authtype_upper == APPLE80211_AUTHTYPE_WPA3_SAE || authtype_upper == APPLE80211_AUTHTYPE_WPA3_FT_SAE) {
         wpa.i_protos |= IEEE80211_WPA_PROTO_WPA2;
         authtype_upper |= APPLE80211_AUTHTYPE_WPA2_PSK;// hack
     }
     // AUTHTYPE_WPA3_ENTERPRISE AUTHTYPE_WPA3_FT_ENTERPRISE
-    if (authtype_upper == 0x4000 || authtype_upper == 0x8000) {
+    if (authtype_upper == APPLE80211_AUTHTYPE_WPA3_ENTERPRISE || authtype_upper == APPLE80211_AUTHTYPE_WPA3_FT_ENTERPRISE) {
         wpa.i_protos |= IEEE80211_WPA_PROTO_WPA2;
         authtype_upper |= APPLE80211_AUTHTYPE_WPA2;// hack
     }
@@ -519,6 +520,7 @@ void AirportItlwm::stop(IOService *provider)
     XYLog("%s\n", __FUNCTION__);
     struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
     super::stop(provider);
+    disableAdapter(fNetIf);
     setLinkStatus(kIONetworkLinkValid);
     fHalService->detach(pciNub);
     detachInterface(fNetIf, true);
@@ -623,24 +625,36 @@ void AirportItlwm::free()
 
 IOReturn AirportItlwm::enable(IONetworkInterface *netif)
 {
-    XYLog("%s\n", __FUNCTION__);
+    XYLog("%s\n", __PRETTY_FUNCTION__);
     super::enable(netif);
     _fCommandGate->enable();
+    if (power_state) {
+        enableAdapter(netif);
+    }
+    return kIOReturnSuccess;
+}
+
+IOReturn AirportItlwm::disable(IONetworkInterface *netif)
+{
+    XYLog("%s\n", __PRETTY_FUNCTION__);
+    super::disable(netif);
+    setLinkStatus(kIONetworkLinkValid);
+    return kIOReturnSuccess;
+}
+
+IOReturn AirportItlwm::enableAdapter(IONetworkInterface *netif)
+{
     fHalService->enable(netif);
     watchdogTimer->setTimeoutMS(kWatchDogTimerPeriod);
     watchdogTimer->enable();
     return kIOReturnSuccess;
 }
 
-IOReturn AirportItlwm::disable(IONetworkInterface *netif)
+void AirportItlwm::disableAdapter(IONetworkInterface *netif)
 {
-    XYLog("%s\n", __FUNCTION__);
-    super::disable(netif);
-    fHalService->disable(netif);
     watchdogTimer->cancelTimeout();
     watchdogTimer->disable();
-    setLinkStatus(kIONetworkLinkValid);
-    return kIOReturnSuccess;
+    fHalService->disable(netif);
 }
 
 IOReturn AirportItlwm::getHardwareAddress(IOEthernetAddress *addrP) {

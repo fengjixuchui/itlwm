@@ -11,7 +11,7 @@
 * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 * GNU General Public License for more details.
 */
-/*    $OpenBSD: if_iwxvar.h,v 1.11 2020/08/01 16:14:05 stsp Exp $    */
+/*    $OpenBSD: if_iwxvar.h,v 1.13 2020/10/11 07:05:28 mpi Exp $    */
 
 /*
  * Copyright (c) 2014 genua mbh <info@genua.de>
@@ -103,10 +103,10 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
-#include "ieee80211_var.h"
-#include "ieee80211_amrr.h"
-#include "ieee80211_mira.h"
-#include "ieee80211_radiotap.h"
+#include <net80211/ieee80211_var.h>
+#include <net80211/ieee80211_amrr.h>
+#include <net80211/ieee80211_mira.h>
+#include <net80211/ieee80211_radiotap.h>
 
 #include <IOKit/network/IOMbufMemoryCursor.h>
 #include <IOKit/IODMACommand.h>
@@ -136,14 +136,12 @@ struct iwx_tx_radiotap_header {
 	uint8_t		wt_rate;
 	uint16_t	wt_chan_freq;
 	uint16_t	wt_chan_flags;
-	uint8_t		wt_hwqueue;
 } __packed;
 
 #define IWX_TX_RADIOTAP_PRESENT						\
 	((1 << IEEE80211_RADIOTAP_FLAGS) |				\
 	 (1 << IEEE80211_RADIOTAP_RATE) |				\
-	 (1 << IEEE80211_RADIOTAP_CHANNEL) |				\
-	 (1 << IEEE80211_RADIOTAP_HWQUEUE))
+	 (1 << IEEE80211_RADIOTAP_CHANNEL))
 
 #define IWX_UCODE_SECT_MAX 42
 #define IWX_FWDMASEGSZ (192*1024)

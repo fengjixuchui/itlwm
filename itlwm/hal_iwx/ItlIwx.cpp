@@ -11,7 +11,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-/*    $OpenBSD: if_iwx.c,v 1.43 2020/08/02 11:11:07 stsp Exp $    */
+/*    $OpenBSD: if_iwx.c,v 1.45 2020/10/11 07:05:28 mpi Exp $    */
 
 /*
  * Copyright (c) 2014, 2016 genua gmbh <info@genua.de>
@@ -107,10 +107,10 @@
  */
 
 #include "ItlIwx.hpp"
-#include "types.h"
-#include "kernel.h"
-#include "FwData.h"
-#include "sha1.h"
+#include <linux/types.h>
+#include <linux/kernel.h>
+#include <FwData.h>
+#include <crypto/sha1.h>
 
 #include <IOKit/IOInterruptController.h>
 #include <IOKit/IOCommandGate.h>
@@ -213,6 +213,8 @@ IOReturn ItlIwx::enable(IONetworkInterface *netif)
 IOReturn ItlIwx::disable(IONetworkInterface *netif)
 {
     XYLog("%s\n", __FUNCTION__);
+    struct _ifnet *ifp = &com.sc_ic.ic_ac.ac_if;
+    ifp->if_flags &= ~IFF_UP;
     iwx_activate(&com, DVACT_QUIESCE);
     return kIOReturnSuccess;
 }
@@ -4228,7 +4230,6 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac)
             tap->wt_rate = (0x80 | rinfo->ht_plcp);
         } else
             tap->wt_rate = rinfo->rate;
-        tap->wt_hwqueue = ac;
         if ((ic->ic_flags & IEEE80211_F_WEPON) &&
             (wh->i_fc[1] & IEEE80211_FC1_PROTECTED))
             tap->wt_flags |= IEEE80211_RADIOTAP_F_WEP;

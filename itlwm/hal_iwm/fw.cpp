@@ -11,7 +11,7 @@
 * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 * GNU General Public License for more details.
 */
-/*    $OpenBSD: if_iwm.c,v 1.313 2020/07/10 13:22:20 patrick Exp $    */
+/*    $OpenBSD: if_iwm.c,v 1.316 2020/12/07 20:09:24 tobhe Exp $    */
 
 /*
  * Copyright (c) 2014, 2016 genua gmbh <info@genua.de>
@@ -120,7 +120,7 @@
  */
 
 #include "ItlIwm.hpp"
-#include "FwData.h"
+#include <FwData.h>
 
 int ItlIwm::
 iwm_is_mimo_ht_plcp(uint8_t ht_plcp)

@@ -11,7 +11,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-/*    $OpenBSD: ieee80211_input.c,v 1.215 2020/03/11 12:39:27 tobhe Exp $    */
+/*	$OpenBSD: ieee80211_input.c,v 1.228 2020/12/10 12:52:49 stsp Exp $	*/
 
 /*-
  * Copyright (c) 2001 Atsushi Onoe
@@ -77,6 +77,7 @@ void    ieee80211_input_ba(struct ieee80211com *, mbuf_t,
                            struct mbuf_list *);
 void    ieee80211_input_ba_flush(struct ieee80211com *, struct ieee80211_node *,
                                  struct ieee80211_rx_ba *, struct mbuf_list *);
+int	   ieee80211_input_ba_gap_skip(struct ieee80211_rx_ba *);
 void    ieee80211_input_ba_gap_timeout(void *arg);
 void    ieee80211_ba_move_window(struct ieee80211com *,
                                  struct ieee80211_node *, u_int8_t, u_int16_t, struct mbuf_list *);
@@ -146,18 +147,41 @@ void    ieee80211_bar_tid(struct ieee80211com *, struct ieee80211_node *,
 u_int
 ieee80211_get_hdrlen(const struct ieee80211_frame *wh)
 {
-    u_int size = sizeof(*wh);
+    unsigned int hdrlen = 24;
+    if (ieee80211_is_data(wh)) {
+        if (ieee80211_has_addr4(wh))
+            hdrlen = 30;
+        if (ieee80211_has_qos(wh)) {
+            hdrlen += 2;
+            if (ieee80211_has_order(wh))
+                hdrlen += 4;
+        }
+        goto out;
+    }
     
-    /* NB: does not work with control frames */
-    _KASSERT(ieee80211_has_seq(wh));
+    if (ieee80211_is_mgmt(wh)) {
+        if (ieee80211_has_order(wh))
+            hdrlen += 4;
+        goto out;
+    }
     
-    if (ieee80211_has_addr4(wh))
-        size += IEEE80211_ADDR_LEN;    /* i_addr4 */
-    if (ieee80211_has_qos(wh))
-        size += sizeof(u_int16_t);    /* i_qos */
-    if (ieee80211_has_htc(wh))
-        size += sizeof(u_int32_t);    /* i_ht */
-    return size;
+    if (ieee80211_is_ctl(wh)) {
+        /*
+         * ACK and CTS are 10 bytes, all others 16. To see how
+         * to get this condition consider
+         *   subtype mask:   0b0000000011110000 (0x00F0)
+         *   ACK subtype:    0b0000000011010000 (0x00D0)
+         *   CTS subtype:    0b0000000011000000 (0x00C0)
+         *   bits that matter:         ^^^      (0x00E0)
+         *   value of those: 0b0000000011000000 (0x00C0)
+         */
+        if ((wh->i_fc[0] & cpu_to_le16(0x00E0)) == cpu_to_le16(0x00C0))
+            hdrlen = 10;
+        else
+            hdrlen = 16;
+    }
+out:
+    return hdrlen;
 }
 
 /* Post-processing for drivers which perform decryption in hardware. */
@@ -368,6 +392,17 @@ ieee80211_inputm(struct _ifnet *ifp, mbuf_t m, struct ieee80211_node *ni,
             /* go through A-MPDU reordering */
             ieee80211_input_ba(ic, m, ni, tid, rxi, ml);
             return;    /* don't free m! */
+        } else if (ba_state == IEEE80211_BA_REQUESTED &&
+            (qos & IEEE80211_QOS_ACK_POLICY_MASK) ==
+            IEEE80211_QOS_ACK_POLICY_NORMAL) {
+            /*
+             * Apparently, qos frames for a tid where a
+             * block ack agreement was requested but not
+             * yet confirmed by us should still contribute
+             * to the sequence number for this tid.
+             */
+            ieee80211_input_ba(ic, m, ni, tid, rxi, ml);
+            return;    /* don't free m! */
         }
     }
     
@@ -530,14 +565,14 @@ ieee80211_inputm(struct _ifnet *ifp, mbuf_t m, struct ieee80211_node *ni,
                     goto out;
             }
             
-#if NBPFILTER > 0
             /* Do not process "no data" frames any further. */
             if (subtype & IEEE80211_FC0_SUBTYPE_NODATA) {
+#if NBPFILTER > 0
                 if (ic->ic_rawbpf)
                     bpf_mtap(ic->ic_rawbpf, m, BPF_DIRECTION_IN);
+#endif
                 goto out;
             }
-#endif
             
             if ((ic->ic_flags & IEEE80211_F_WEPON) ||
                 ((ic->ic_flags & IEEE80211_F_RSNON) &&
@@ -856,11 +891,10 @@ ieee80211_input_ba(struct ieee80211com *ic, mbuf_t m,
     /* store Rx meta-data too */
     rxi->rxi_flags |= IEEE80211_RXI_AMPDU_DONE;
     ba->ba_buf[idx].rxi = *rxi;
-    
-    if (ba->ba_buf[ba->ba_head].m == NULL)
-         timeout_add_msec(&ba->ba_gap_to, IEEE80211_BA_GAP_TIMEOUT);
-     else if (timeout_pending(&ba->ba_gap_to))
-         timeout_del(&ba->ba_gap_to);
+    ba->ba_gapwait++;
+
+    if (ba->ba_buf[ba->ba_head].m == NULL && ba->ba_gapwait == 1)
+        timeout_add_msec(&ba->ba_gap_to, IEEE80211_BA_GAP_TIMEOUT);
     
     ieee80211_input_ba_flush(ic, ni, ba, ml);
 }
@@ -892,6 +926,7 @@ ieee80211_input_ba_seq(struct ieee80211com *ic, struct ieee80211_node *ni,
             ieee80211_inputm(ifp, ba->ba_buf[ba->ba_head].m,
                              ni, &ba->ba_buf[ba->ba_head].rxi, ml);
             ba->ba_buf[ba->ba_head].m = NULL;
+            ba->ba_gapwait--;
         } else
             ic->ic_stats.is_ht_rx_ba_frame_lost++;
         ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_WINSZ;
@@ -914,12 +949,18 @@ ieee80211_input_ba_flush(struct ieee80211com *ic, struct ieee80211_node *ni,
         ieee80211_inputm(ifp, ba->ba_buf[ba->ba_head].m, ni,
                          &ba->ba_buf[ba->ba_head].rxi, ml);
         ba->ba_buf[ba->ba_head].m = NULL;
+        ba->ba_gapwait--;
         
         ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_WINSZ;
         /* move window forward */
         ba->ba_winstart = (ba->ba_winstart + 1) & 0xfff;
     }
     ba->ba_winend = (ba->ba_winstart + ba->ba_winsize - 1) & 0xfff;
+    
+    if (timeout_pending(&ba->ba_gap_to))
+        timeout_del(&ba->ba_gap_to);
+    if (ba->ba_gapwait)
+        timeout_add_msec(&ba->ba_gap_to, IEEE80211_BA_GAP_TIMEOUT);
 }
 
 /* 
@@ -928,10 +969,26 @@ ieee80211_input_ba_flush(struct ieee80211com *ic, struct ieee80211_node *ni,
  * A leading gap will occur if a particular A-MPDU subframe never arrives
  * or if a bug in the sender causes sequence numbers to jump forward by > 1.
  */
+int
+ieee80211_input_ba_gap_skip(struct ieee80211_rx_ba *ba)
+{
+    int skipped = 0;
+
+    while (skipped < ba->ba_winsize && ba->ba_buf[ba->ba_head].m == NULL) {
+        /* move window forward */
+        ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_WINSZ;
+        ba->ba_winstart = (ba->ba_winstart + 1) & 0xfff;
+        skipped++;
+    }
+    if (skipped > 0)
+        ba->ba_winend = (ba->ba_winstart + ba->ba_winsize - 1) & 0xfff;
+
+    return skipped;
+}
+
 void
 ieee80211_input_ba_gap_timeout(void *arg)
 {
-    struct mbuf_list ml = MBUF_LIST_INITIALIZER();
     struct ieee80211_rx_ba *ba = (struct ieee80211_rx_ba *)arg;
     struct ieee80211_node *ni = ba->ba_ni;
     struct ieee80211com *ic = ni->ni_ic;
@@ -941,19 +998,13 @@ ieee80211_input_ba_gap_timeout(void *arg)
     
     s = splnet();
     
-    skipped = 0;
-    while (skipped < ba->ba_winsize && ba->ba_buf[ba->ba_head].m == NULL) {
-        /* move window forward */
-        ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_WINSZ;
-        ba->ba_winstart = (ba->ba_winstart + 1) & 0xfff;
-        skipped++;
-        ic->ic_stats.is_ht_rx_ba_frame_lost++;
+    skipped = ieee80211_input_ba_gap_skip(ba);
+    ic->ic_stats.is_ht_rx_ba_frame_lost += skipped;
+    if (skipped) {
+        struct mbuf_list ml = MBUF_LIST_INITIALIZER();
+        ieee80211_input_ba_flush(ic, ni, ba, &ml);
+        if_input(&ic->ic_if, &ml);
     }
-    if (skipped > 0)
-        ba->ba_winend = (ba->ba_winstart + ba->ba_winsize - 1) & 0xfff;
-    
-    ieee80211_input_ba_flush(ic, ni, ba, &ml);
-    if_input(&ic->ic_if, &ml);
     
     splx(s);
 }
@@ -982,6 +1033,7 @@ ieee80211_ba_move_window(struct ieee80211com *ic, struct ieee80211_node *ni,
             ieee80211_inputm(ifp, ba->ba_buf[ba->ba_head].m, ni,
                              &ba->ba_buf[ba->ba_head].rxi, ml);
             ba->ba_buf[ba->ba_head].m = NULL;
+            ba->ba_gapwait--;
         } else
             ic->ic_stats.is_ht_rx_ba_frame_lost++;
         ba->ba_head = (ba->ba_head + 1) % IEEE80211_BA_MAX_WINSZ;
@@ -1141,14 +1193,12 @@ ieee80211_amsdu_decap(struct ieee80211com *ic, mbuf_t m,
     /* strip 802.11 header */
     mbuf_adj(m, hdrlen);
     
-    for (;;) {
+    while (mbuf_pkthdr_len(m) >= ETHER_HDR_LEN + LLC_SNAPFRAMELEN) {
         /* process an A-MSDU subframe */
-        if (mbuf_len(m) < ETHER_HDR_LEN + LLC_SNAPFRAMELEN) {
-            mbuf_pullup(&m, ETHER_HDR_LEN + LLC_SNAPFRAMELEN);
-            if (m == NULL) {
-                ic->ic_stats.is_rx_decap++;
-                break;
-            }
+        mbuf_pullup(&m, ETHER_HDR_LEN + LLC_SNAPFRAMELEN);
+        if (m == NULL) {
+            ic->ic_stats.is_rx_decap++;
+            return;
         }
         eh = mtod(m, struct ether_header *);
         /* examine 802.3 header */
@@ -1158,7 +1208,7 @@ ieee80211_amsdu_decap(struct ieee80211com *ic, mbuf_t m,
             /* stop processing A-MSDU subframes */
             ic->ic_stats.is_rx_decap++;
             mbuf_freem(m);
-            break;
+            return;
         }
         llc = (struct llc *)&eh[1];
         /* examine 802.2 LLC header */
@@ -1182,7 +1232,7 @@ ieee80211_amsdu_decap(struct ieee80211com *ic, mbuf_t m,
             DPRINTF(("A-MSDU subframe too long (%d)\n", len));
             ic->ic_stats.is_rx_decap++;
             mbuf_freem(m);
-            break;
+            return;
         }
         
         /* "detach" our A-MSDU subframe from the others */
@@ -1191,19 +1241,17 @@ ieee80211_amsdu_decap(struct ieee80211com *ic, mbuf_t m,
             /* stop processing A-MSDU subframes */
             ic->ic_stats.is_rx_decap++;
             mbuf_freem(m);
-            break;
+            return;
         }
         ieee80211_enqueue_data(ic, m, ni, mcast, ml);
         
-        if (mbuf_pkthdr_len(n) == 0) {
-            mbuf_freem(n);
-            break;
-        }
         m = n;
         /* remove padding */
         pad = ((len + 3) & ~3) - len;
         mbuf_adj(m, pad);
     }
+    
+    mbuf_freem(m);
 }
 
 /*
@@ -2155,7 +2203,7 @@ ieee80211_recv_probe_req(struct ieee80211com *ic, mbuf_t m,
         return;
     }
     /* refuse wildcard SSID if we're hiding our SSID in beacons */
-    if (ssid[1] == 0 && (ic->ic_flags & IEEE80211_F_HIDENWID)) {
+    if (ssid[1] == 0 && (ic->ic_userflags & IEEE80211_F_HIDENWID)) {
         DPRINTF(("wildcard SSID rejected"));
         ic->ic_stats.is_rx_ssidmismatch++;
         return;
@@ -2913,6 +2961,9 @@ ieee80211_recv_addba_req(struct ieee80211com *ic, mbuf_t m,
     ssn = LE_READ_2(&frm[7]) >> 4;
     
     ba = &ni->ni_rx_ba[tid];
+    /* The driver is still processing an ADDBA request for this tid. */
+    if (ba->ba_state == IEEE80211_BA_REQUESTED)
+        return;
     /* check if we already have a Block Ack agreement for this RA/TID */
     if (ba->ba_state == IEEE80211_BA_AGREED) {
         /* XXX should we update the timeout value? */
@@ -2952,27 +3003,22 @@ ieee80211_recv_addba_req(struct ieee80211com *ic, mbuf_t m,
         goto refuse;
     
     /* setup Block Ack agreement */
-    ba->ba_state = IEEE80211_BA_INIT;
+    ba->ba_state = IEEE80211_BA_REQUESTED;
     ba->ba_timeout_val = timeout * IEEE80211_DUR_TU;
     ba->ba_ni = ni;
     ba->ba_token = token;
     timeout_set(&ba->ba_to, ieee80211_rx_ba_timeout, ba);
     timeout_set(&ba->ba_gap_to, ieee80211_input_ba_gap_timeout, ba);
+    ba->ba_gapwait = 0;
     ba->ba_winsize = bufsz;
     if (ba->ba_winsize == 0 || ba->ba_winsize > IEEE80211_BA_MAX_WINSZ)
         ba->ba_winsize = IEEE80211_BA_MAX_WINSZ;
     ba->ba_params = (params & IEEE80211_ADDBA_BA_POLICY);
     ba->ba_params |= ((ba->ba_winsize << IEEE80211_ADDBA_BUFSZ_SHIFT) |
                       (tid << IEEE80211_ADDBA_TID_SHIFT));
-#if 0
-    /*
-     * XXX A-MSDUs inside A-MPDUs expose a problem with bad TCP connection
-     * sharing behaviour. One connection eats all available bandwidth
-     * while others stall. Leave this disabled for now to give packets
-     * from disparate connections better chances of interleaving.
-     */
-    ba->ba_params |= IEEE80211_ADDBA_AMSDU;
-#endif
+    if (ic->ic_caps & IEEE80211_C_AMSDU_IN_AMPDU) {
+        ba->ba_params |= IEEE80211_ADDBA_AMSDU;
+    }
     ba->ba_winstart = ssn;
     ba->ba_winend = (ba->ba_winstart + ba->ba_winsize - 1) & 0xfff;
     /* allocate and setup our reordering buffer */
@@ -3029,6 +3075,7 @@ ieee80211_addba_req_refuse(struct ieee80211com *ic, struct ieee80211_node *ni,
     IOFree(ba->ba_buf,
            IEEE80211_BA_MAX_WINSZ * sizeof(*ba->ba_buf));
     ba->ba_buf = NULL;
+    ba->ba_state = IEEE80211_BA_INIT;
     
     /* MLME-ADDBA.response */
     IEEE80211_SEND_ACTION(ic, ni, IEEE80211_CATEG_BA,
@@ -3197,6 +3244,7 @@ ieee80211_recv_delba(struct ieee80211com *ic, mbuf_t m,
         /* stop Block Ack inactivity timer */
         timeout_del(&ba->ba_to);
         timeout_del(&ba->ba_gap_to);
+        ba->ba_gapwait = 0;
         
         if (ba->ba_buf != NULL) {
             /* free all MSDUs stored in reordering buffer */

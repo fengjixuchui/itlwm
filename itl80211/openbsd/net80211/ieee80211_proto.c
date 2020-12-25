@@ -496,15 +496,26 @@ ieee80211_setkeysdone(struct ieee80211com *ic)
 
 	/* install GTK */
 	kid = (ic->ic_def_txkey == 1) ? 2 : 1;
-	if ((*ic->ic_set_key)(ic, ic->ic_bss, &ic->ic_nw_keys[kid]) == 0)
-		ic->ic_def_txkey = kid;
+    switch ((*ic->ic_set_key)(ic, ic->ic_bss, &ic->ic_nw_keys[kid])) {
+        case 0:
+        case EBUSY:
+            ic->ic_def_txkey = kid;
+            break;
+        default:
+            break;
+    }
 
 	if (ic->ic_caps & IEEE80211_C_MFP) {
 		/* install IGTK */
 		kid = (ic->ic_igtk_kid == 4) ? 5 : 4;
-		if ((*ic->ic_set_key)(ic, ic->ic_bss,
-		    &ic->ic_nw_keys[kid]) == 0)
-			ic->ic_igtk_kid = kid;
+        switch ((*ic->ic_set_key)(ic, ic->ic_bss, &ic->ic_nw_keys[kid])) {
+            case 0:
+            case EBUSY:
+                ic->ic_igtk_kid = kid;
+                break;
+            default:
+                break;
+        }
 	}
 }
 
@@ -701,15 +712,9 @@ ieee80211_addba_request(struct ieee80211com *ic, struct ieee80211_node *ni,
 	ba->ba_params =
 	    (ba->ba_winsize << IEEE80211_ADDBA_BUFSZ_SHIFT) |
 	    (tid << IEEE80211_ADDBA_TID_SHIFT);
-#if 0
-	/*
-	 * XXX A-MSDUs inside A-MPDUs expose a problem with bad TCP connection
-	 * sharing behaviour. One connection eats all available bandwidth
-	 * while others stall. Leave this disabled for now to give packets
-	 * from disparate connections better chances of interleaving.
-	 */
-	ba->ba_params |= IEEE80211_ADDBA_AMSDU;
-#endif
+    if (ic->ic_caps & IEEE80211_C_AMSDU_IN_AMPDU) {
+        ba->ba_params |= IEEE80211_ADDBA_AMSDU;
+    }
 	if ((ic->ic_htcaps & IEEE80211_HTCAP_DELAYEDBA) == 0)
 		/* immediate BA */
 		ba->ba_params |= IEEE80211_ADDBA_BA_POLICY;

@@ -12,14 +12,14 @@
 * GNU General Public License for more details.
 */
 #include "itlwm.hpp"
-#include "types.h"
-#include "kernel.h"
+#include <linux/types.h>
+#include <linux/kernel.h>
 
 #include <IOKit/IOInterruptController.h>
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/network/IONetworkMedium.h>
 #include <net/ethernet.h>
-#include "sha1.h"
+#include <crypto/sha1.h>
 #include <net80211/ieee80211_node.h>
 #include <net80211/ieee80211_ioctl.h>
 
@@ -536,9 +536,9 @@ IOReturn itlwm::disable(IONetworkInterface *netif)
 {
     XYLog("%s\n", __FUNCTION__);
     super::disable(netif);
-    fHalService->disable(netif);
     watchdogTimer->cancelTimeout();
     watchdogTimer->disable();
+    fHalService->disable(netif);
     setLinkStatus(kIONetworkLinkValid);
     return kIOReturnSuccess;
 }
