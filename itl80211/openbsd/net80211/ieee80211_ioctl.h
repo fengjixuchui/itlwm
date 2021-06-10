@@ -123,6 +123,8 @@ struct ieee80211_stats {
 	u_int32_t	is_ht_rx_ba_window_gap_timeout;
 	u_int32_t	is_ht_rx_ba_timeout;
 	u_int32_t	is_ht_tx_ba_timeout;
+    u_int32_t   is_vht_nego_no_mandatory_mcs;
+    u_int32_t   is_vht_nego_bad_crypto;
 };
 
 #define	SIOCG80211STATS		_IOWR('i', 242, struct ifreq)
@@ -333,7 +335,7 @@ struct ieee80211_nodereq {
 
 	/* Channel and rates */
 	u_int16_t	nr_channel;			/* last channel */
-	u_int16_t	nr_chan_flags;			/* channel flags */
+	u_int32_t	nr_chan_flags;		/* channel flags */
 	u_int8_t	nr_nrates;			/* rate count */
 	u_int8_t	nr_rates[IEEE80211_RATE_MAXSIZE];	/* rate set */
 

@@ -825,6 +825,21 @@ struct apple80211_mcs_index_set_data
     u_int8_t    mcs_set_map[APPLE80211_MAP_SIZE( APPLE80211_MAX_MCS_INDEX + 1 )];
 };
 
+struct apple80211_vht_mcs_index_set_data
+{
+    u_int32_t   version;
+    u_int16_t    mcs_map;
+} __attribute__((packed));
+
+struct apple80211_mcs_vht_data 
+{
+    u_int32_t   version;
+    u_int32_t   index;
+    u_int32_t   nss;
+    u_int32_t   bw;
+    u_int32_t   guard_interval;
+} __attribute__((packed));
+
 struct apple80211_wow_parameter_data
 {
     u_int32_t                     version;
@@ -1067,6 +1082,14 @@ struct apple80211_p2p_go_conf_data {
     uint32_t    ssid_len;       // 20
     uint8_t     ssid[32];       // 24
     uint32_t    suppress_beacon;// 56 security:1,4
+} __attribute__((packed));
+
+struct apple80211_sta_roam_data {
+    uint32_t    version;
+    uint8_t     rcc_channels;
+    uint8_t     unk1;
+    uint8_t     taget_channel;
+    uint8_t     target_bssid[APPLE80211_ADDR_LEN];
 } __attribute__((packed));
 
 #endif // _APPLE80211_IOCTL_H_

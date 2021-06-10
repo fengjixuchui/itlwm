@@ -212,6 +212,7 @@ struct iwx_nvm_data {
 	int sku_cap_ipan_enable;
 	int sku_cap_mimo_disable;
     int lar_enabled;
+    bool vht160_supported;
 
 	uint8_t valid_tx_ant, valid_rx_ant;
 
@@ -257,6 +258,7 @@ struct iwx_tx_data {
 	bus_addr_t	cmd_paddr;
 	mbuf_t m;
 	struct iwx_node *in;
+    uint8_t type;
 };
 
 struct iwx_tx_ring {
@@ -386,16 +388,115 @@ struct iwx_tid_data {
 #define DELAY IODelay
 #endif
 
+struct iwl_cfg_trans_params {
+    int integrated;
+    int device_family;
+    int low_latency_xtal;
+    int ltr_delay;
+    int xtal_latency;
+    int bisr_workaround;
+};
+
 struct iwl_cfg {
+    struct iwl_cfg_trans_params trans;
+    const char *name;
     const char *fwname;
     int device_family;
-    uint32_t fwdmasegsz;
-    int integrated;
-    int ltr_delay;
-    int low_latency_xtal;
-    int xtal_latency;
     int tx_with_siso_diversity;
     int uhb_supported;
+};
+
+/**
+ * struct iwx_reorder_buffer - per ra/tid/queue reorder buffer
+ * @head_sn: reorder window head sn
+ * @num_stored: number of mpdus stored in the buffer
+ * @buf_size: the reorder buffer size as set by the last addba request
+ * @queue: queue of this reorder buffer
+ * @last_amsdu: track last ASMDU SN for duplication detection
+ * @last_sub_index: track ASMDU sub frame index for duplication detection
+ * @reorder_timer: timer for frames are in the reorder buffer. For AMSDU
+ *    it is the time of last received sub-frame
+ * @removed: prevent timer re-arming
+ * @valid: reordering is valid for this queue
+ * @consec_oldsn_drops: consecutive drops due to old SN
+ * @consec_oldsn_ampdu_gp2: A-MPDU GP2 timestamp to track
+ *    when to apply old SN consecutive drop workaround
+ * @consec_oldsn_prev_drop: track whether or not an MPDU
+ *    that was single/part of the previous A-MPDU was
+ *    dropped due to old SN
+ */
+struct iwx_reorder_buffer {
+    uint16_t head_sn;
+    uint16_t num_stored;
+    uint16_t buf_size;
+    uint16_t last_amsdu;
+    uint8_t last_sub_index;
+    CTimeout *reorder_timer;
+    int removed;
+    int valid;
+    unsigned int consec_oldsn_drops;
+    uint32_t consec_oldsn_ampdu_gp2;
+    unsigned int consec_oldsn_prev_drop;
+#define IWX_AMPDU_CONSEC_DROPS_DELBA    10
+};
+
+/**
+ * struct iwx_reorder_buf_entry - reorder buffer entry per frame sequence number
+ * @frames: list of mbufs stored (A-MSDU subframes share a sequence number)
+ * @reorder_time: time the packet was stored in the reorder buffer
+ */
+struct iwx_reorder_buf_entry {
+    struct mbuf_list frames;
+    struct timeval reorder_time;
+    uint32_t rx_pkt_status;
+    int chanidx;
+    int is_shortpre;
+    uint32_t rate_n_flags;
+    uint32_t device_timestamp;
+    struct ieee80211_rxinfo rxi;
+};
+
+/**
+ * struct iwx_rxba_data - BA session data
+ * @sta_id: station id
+ * @tid: tid of the session
+ * @baid: baid of the session
+ * @timeout: the timeout set in the addba request
+ * @entries_per_queue: # of buffers per queue
+ * @last_rx: last rx timestamp, updated only if timeout passed from last update
+ * @session_timer: timer to check if BA session expired, runs at 2 * timeout
+ * @sc: softc pointer, needed for timer context
+ * @reorder_buf: reorder buffer
+ * @reorder_buf_data: buffered frames, one entry per sequence number
+ */
+struct iwx_rxba_data {
+    uint8_t sta_id;
+    uint8_t tid;
+    uint8_t baid;
+    uint16_t timeout;
+    uint16_t entries_per_queue;
+    struct timeval last_rx;
+    CTimeout *session_timer;
+    struct iwx_softc *sc;
+    struct iwx_reorder_buffer reorder_buf;
+    struct iwx_reorder_buf_entry entries[IEEE80211_BA_MAX_WINSZ];
+};
+
+static inline struct iwx_rxba_data *
+iwx_rxba_data_from_reorder_buf(struct iwx_reorder_buffer *buf)
+{
+    return (struct iwx_rxba_data *)((uint8_t *)buf -
+            offsetof(struct iwx_rxba_data, reorder_buf));
+}
+
+/**
+ * struct iwx_rxq_dup_data - per station per rx queue data
+ * @last_seq: last sequence per tid for duplicate packet detection
+ * @last_sub_frame: last subframe packet
+ */
+struct iwx_rxq_dup_data {
+    uint16_t last_seq[IWX_MAX_TID_COUNT + 1];
+    uint8_t last_sub_frame[IWX_MAX_TID_COUNT + 1];
 };
 
 struct iwx_softc {
@@ -413,18 +514,22 @@ struct iwx_softc {
 
 	/* Task for firmware BlockAck setup/teardown and its arguments. */
 	struct task	ba_task;
-	int			ba_start;
-	int			ba_tid;
+	int			ba_tx_start;
+	int			ba_tx_tid;
     int         ba_tx;
-	uint16_t    ba_ssn;
-	uint16_t	ba_winsize;
+	uint16_t    ba_tx_ssn;
+	uint16_t	ba_tx_winsize;
+    
+    uint32_t        ba_start_tidmask;
+    uint32_t        ba_stop_tidmask;
+    uint16_t        ba_ssn[IWX_MAX_TID_COUNT];
+    uint16_t        ba_winsize[IWX_MAX_TID_COUNT];
+    int            ba_timeout_val[IWX_MAX_TID_COUNT];
     
     struct iwx_tid_data sc_tid_data[IWX_MAX_TID_COUNT + 1];//per tid data + mgmt. Look at %iwx_tid_data.
-    uint32_t sc_tfd_queue_msk;//the tfd queues used by the station
-    uint16_t sc_tid_disable_agg;//bitmap: if bit(tid) is set, the fw won't send ampdus for tid
 
-	/* Task for HT protection updates. */
-	struct task	htprot_task;
+    /* Task for ERP/HT prot/slot-time/EDCA updates. */
+    struct task        mac_ctxt_task;
 
 	bus_space_tag_t sc_st;
 	bus_space_handle_t sc_sh;
@@ -457,12 +562,11 @@ struct iwx_softc {
 #define IWX_SILICON_D_STEP	3
     int sc_hw_rf_id;
 	int sc_hw_id;
+    const struct iwl_cfg_trans_params *sc_cfg_params;
     const struct iwl_cfg *sc_cfg;
 	int sc_device_family;
 #define IWX_DEVICE_FAMILY_22000	1
 #define IWX_DEVICE_FAMILY_22560	2
-
-	struct iwx_dma_info fw_dma;
 
 	struct iwx_dma_info ctxt_info_dma;
 	struct iwx_self_init_dram init_dram;
@@ -501,7 +605,6 @@ struct iwx_softc {
 	int sc_cap_off; /* PCIe caps */
 
 	const char *sc_fwname;
-	bus_size_t sc_fwdmasegsz;
 	struct iwx_fw_info sc_fw;
 	struct iwx_dma_info fw_mon;
 	int sc_fw_phy_config;
@@ -516,6 +619,9 @@ struct iwx_softc {
 	int sc_scan_last_antenna;
 
 	int sc_fixed_ridx;
+    
+    uint8_t sc_tx_ant; /* for fixed mcs/rate using */
+    uint8_t sc_mgmt_last_antenna_idx; /* for MGMT frames using*/
 
 	int sc_staid;
 	int sc_nodecolor;
@@ -527,7 +633,9 @@ struct iwx_softc {
 	struct taskq *sc_nswq;
 
 	struct iwx_rx_phy_info sc_last_phy_info;
-	int sc_ampdu_ref;
+    int sc_ampdu_ref;
+#define IWX_MAX_BAID    32
+    struct iwx_rxba_data sc_rxba_data[IWX_MAX_BAID];
 
 	uint32_t sc_time_event_uid;
 
@@ -574,6 +682,8 @@ struct iwx_node {
 
 	uint16_t in_id;
 	uint16_t in_color;
+    
+    struct iwx_rxq_dup_data dup_data;
 };
 #define IWX_STATION_ID 0
 #define IWX_AUX_STA_ID 1

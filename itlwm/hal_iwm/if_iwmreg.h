@@ -348,7 +348,6 @@
 
 
 /* CSR GIO */
-#define IWM_CSR_GIO_REG_VAL_L0S_ENABLED    (0x00000002)
 #define IWM_CSR_GIO_REG_VAL_L0S_DISABLED    (0x00000002)
 
 /*
@@ -3161,6 +3160,9 @@ struct iwm_rx_mpdu_res_start {
 #define    IWM_RX_MPDU_MFLG2_PAD            0x20
 #define IWM_RX_MPDU_MFLG2_AMSDU            0x40
 
+#define IWM_RX_MPDU_AMSDU_SUBFRAME_IDX_MASK    0x7f
+#define IWM_RX_MPDU_AMSDU_LAST_SUBFRAME                0x80
+
 #define IWM_RX_MPDU_PHY_AMPDU            (1 << 5)
 #define IWM_RX_MPDU_PHY_AMPDU_TOGGLE        (1 << 6)
 #define IWM_RX_MPDU_PHY_SHORT_PREAMBLE        (1 << 7)
@@ -3190,6 +3192,15 @@ struct iwm_rx_mpdu_desc_v1 {
         };
     };
 } __packed;
+
+#define IWM_RX_REORDER_DATA_INVALID_BAID       0x7f
+
+#define IWM_RX_MPDU_REORDER_NSSN_MASK          0x00000fff
+#define IWM_RX_MPDU_REORDER_SN_MASK            0x00fff000
+#define IWM_RX_MPDU_REORDER_SN_SHIFT           12
+#define IWM_RX_MPDU_REORDER_BAID_MASK          0x7f000000
+#define IWM_RX_MPDU_REORDER_BAID_SHIFT         24
+#define IWM_RX_MPDU_REORDER_BA_OLD_SN          0x80000000
 
 struct iwm_rx_mpdu_desc {
     uint16_t mpdu_len;
@@ -4239,7 +4250,7 @@ struct iwm_beacon_filter_cmd {
 #define IWM_RATE_VHT_MIMO2_MCS_7_PLCP    0x17
 #define IWM_RATE_VHT_MIMO2_MCS_8_PLCP    0x18
 #define IWM_RATE_VHT_MIMO2_MCS_9_PLCP    0x19
-#define IWM_RATE_HT_SISO_MCS_INV_PLCP    0x20
+#define IWM_RATE_HT_SISO_MCS_INV_PLCP    0x1A
 #define IWM_RATE_HT_MIMO2_MCS_INV_PLCP    IWM_RATE_HT_SISO_MCS_INV_PLCP
 #define IWM_RATE_VHT_SISO_MCS_INV_PLCP    IWM_RATE_HT_SISO_MCS_INV_PLCP
 #define IWM_RATE_VHT_MIMO2_MCS_INV_PLCP    IWM_RATE_HT_SISO_MCS_INV_PLCP
@@ -4286,10 +4297,11 @@ enum {
     IWM_RATE_MCS_13_INDEX,
     IWM_RATE_MCS_14_INDEX,
     IWM_RATE_MCS_15_INDEX,
+    IWM_LAST_VHT_SISO_RATE = IWM_RATE_MCS_13_INDEX,
     IWM_LAST_HT_RATE = IWM_RATE_MCS_15_INDEX,
-    IWM_LAST_VHT_RATE = IWM_RATE_MCS_9_INDEX,
+    IWM_LAST_VHT_RATE = IWM_RATE_MCS_15_INDEX + 3,
     IWM_RATE_COUNT_LEGACY = IWM_LAST_NON_HT_RATE + 1,
-    IWM_RATE_COUNT = IWM_LAST_HT_RATE + 1,
+    IWM_RATE_COUNT = IWM_LAST_VHT_RATE + 1,
 };
 
 #define IWM_RATE_BIT_MSK(r) (1 << (IWM_RATE_##r##M_INDEX))
@@ -4648,9 +4660,12 @@ struct iwm_lq_cmd {
 #define IWM_TX_CMD_LIFE_TIME_PROBE_RESP    40000 /* 40 ms */
 #define IWM_TX_CMD_LIFE_TIME_EXPIRED_FRAME    0
 
+#define RX_REORDER_BUF_TIMEOUT_MQ_USEC (100000ULL)
+
 /*
  * TID for non QoS frames - to be written in tid_tspec
  */
+#define IWM_MAX_TID_COUNT      8
 #define IWM_TID_NON_QOS    0
 #define IWM_TID_MGMT   15
 

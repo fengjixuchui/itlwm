@@ -89,6 +89,7 @@ const char * const ieee80211_phymode_name[] = {
 	"11g",		/* IEEE80211_MODE_11G */
 	"11n",		/* IEEE80211_MODE_11N */
     "11ac",     /* IEEE80211_MODE_11AC */
+    "11ax",     /* IEEE80211_MODE_11AX */
 };
 
 void ieee80211_set_beacon_miss_threshold(struct ieee80211com *);
@@ -580,9 +581,11 @@ void
 ieee80211_ht_negotiate(struct ieee80211com *ic, struct ieee80211_node *ni)
 {
 	int i;
+    int ht_param;
 
 	ni->ni_flags &= ~(IEEE80211_NODE_HT | IEEE80211_NODE_HT_SGI20 |
 	    IEEE80211_NODE_HT_SGI40);
+    ni->ni_chw = IEEE80211_CHAN_WIDTH_20;
 
 	/* Check if we support HT. */
 	if ((ic->ic_modecaps & (1 << IEEE80211_MODE_11N)) == 0)
@@ -629,8 +632,288 @@ ieee80211_ht_negotiate(struct ieee80211com *ic, struct ieee80211_node *ni)
 	}
 
 	ni->ni_flags |= IEEE80211_NODE_HT;
+    
+    if (ieee80211_node_supports_ht_sgi20(ni)) {
+        ni->ni_flags |= IEEE80211_NODE_HT_SGI20;
+    }
+    
+    if (((ic->ic_htcaps & IEEE80211_HTCAP_40INTOLERANT) || (ni->ni_htcaps & IEEE80211_HTCAP_40INTOLERANT))
+        && IEEE80211_IS_CHAN_2GHZ(ni->ni_chan)) {
+        ni->ni_chw = 20;
+    } else if ((ni->ni_htcaps & IEEE80211_HTCAP_CBW20_40) && IEEE80211_IS_CHAN_HT40(ni->ni_chan) && (ic->ic_htcaps & IEEE80211_HTCAP_CBW20_40)) {
+        ht_param = ni->ni_htop0 & IEEE80211_HTOP0_SCO_MASK;
+        if ((ht_param == IEEE80211_HTOP0_SCO_SCA && IEEE80211_IS_CHAN_HT40U(ni->ni_chan)) ||
+            (ht_param == IEEE80211_HTOP0_SCO_SCB && IEEE80211_IS_CHAN_HT40D(ni->ni_chan)))  {
+            ni->ni_chw = IEEE80211_CHAN_WIDTH_40;
+            
+            if (ieee80211_node_supports_ht_sgi40(ni)) {
+                ni->ni_flags |= IEEE80211_NODE_HT_SGI40;
+            }
+        }
+    }
+    XYLog("%s %d chan_width=%s\n", __FUNCTION__, __LINE__, ieee80211_chan_width_name[ni->ni_chw]);
+}
 
-	/* Flags IEEE8021_NODE_HT_SGI20/40 are set by drivers if supported. */
+void
+ieee80211_vht_negotiate(struct ieee80211com *ic, struct ieee80211_node *ni)
+{
+    uint8_t chw = 0, ext_nss_bw_supp, supp_chwidth;
+    uint16_t cf0, cf1;
+    int ccfs0, ccfs1, ccfs2;
+    int ccf0, ccf1;
+    bool support_80_80 = false;
+    bool support_160 = false;
+    uint32_t vhtcap = ni->ni_vhtcaps;
+    
+    ni->ni_flags &= ~(IEEE80211_NODE_VHT | IEEE80211_NODE_VHT_SGI80 |
+                      IEEE80211_NODE_VHT_SGI160);
+    /* Check if we support VHT. */
+    if ((ic->ic_modecaps & (1 << IEEE80211_MODE_11AC)) == 0)
+        return;
+
+    /* Check if VHT support has been explicitly disabled. */
+    if ((ic->ic_flags & IEEE80211_F_VHTON) == 0)
+        return;
+    
+    if (!ieee80211_node_supports_vht(ni)) {
+        ic->ic_stats.is_vht_nego_no_mandatory_mcs++;
+        return;
+    }
+    
+    /*
+     * Don't allow group cipher (includes WEP) or TKIP
+     * for pairwise encryption (see 802.11-2012 11.1.6).
+     */
+    if (ic->ic_flags & IEEE80211_F_WEPON) {
+        ic->ic_stats.is_vht_nego_bad_crypto++;
+        return;
+    }
+    if ((ic->ic_flags & IEEE80211_F_RSNON) &&
+        (ni->ni_rsnciphers & IEEE80211_CIPHER_USEGROUP ||
+        ni->ni_rsnciphers & IEEE80211_CIPHER_TKIP)) {
+        ic->ic_stats.is_vht_nego_bad_crypto++;
+        return;
+    }
+    
+    support_160 = (vhtcap & (IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_MASK |
+                  IEEE80211_VHTCAP_EXT_NSS_BW_MASK));
+    support_80_80 = ((vhtcap &
+             IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_160_80P80MHZ) ||
+            (vhtcap & IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_160MHZ &&
+             vhtcap & IEEE80211_VHTCAP_EXT_NSS_BW_MASK) ||
+            ((vhtcap & IEEE80211_VHTCAP_EXT_NSS_BW_MASK) >>
+                    IEEE80211_VHTCAP_EXT_NSS_BW_SHIFT > 1));
+    
+    ext_nss_bw_supp = u32_get_bits(vhtcap,
+                      IEEE80211_VHTCAP_EXT_NSS_BW_MASK);
+    supp_chwidth = u32_get_bits(vhtcap,
+                       IEEE80211_VHTCAP_SUPP_CHAN_WIDTH_MASK);
+    
+    ccfs0 = ni->ni_vht_chan1;
+    ccfs1 = ni->ni_vht_chan2;
+    ccfs2 = (le16toh(ni->ni_htop1) &
+                IEEE80211_HT_OP_MODE_CCFS2_MASK)
+            >> IEEE80211_HT_OP_MODE_CCFS2_SHIFT;
+    
+    ccf0 = ccfs0;
+    
+    if ((ic->ic_caps & IEEE80211_C_SUPPORTS_VHT_EXT_NSS_BW) == 0) {
+        ext_nss_bw_supp = 0;
+    }
+    
+    /*
+     * Cf. IEEE 802.11 Table 9-250
+     *
+     * We really just consider that because it's inefficient to connect
+     * at a higher bandwidth than we'll actually be able to use.
+     */
+    switch ((supp_chwidth << 4) | ext_nss_bw_supp) {
+    default:
+    case 0x00:
+        ccf1 = 0;
+        support_160 = false;
+        support_80_80 = false;
+        break;
+    case 0x01:
+        support_80_80 = false;
+    case 0x02:
+    case 0x03:
+        ccf1 = ccfs2;
+        break;
+    case 0x10:
+        ccf1 = ccfs1;
+        break;
+    case 0x11:
+    case 0x12:
+        if (!ccfs1)
+            ccf1 = ccfs2;
+        else
+            ccf1 = ccfs1;
+        break;
+    case 0x13:
+    case 0x20:
+    case 0x23:
+        ccf1 = ccfs1;
+        break;
+    }
+    
+    cf0 = ieee80211_ieee2mhz(ccf0, ni->ni_chan->ic_flags);
+    cf1 = ieee80211_ieee2mhz(ccf1, ni->ni_chan->ic_flags);
+    
+    switch (ni->ni_vht_chanwidth) {
+        case IEEE80211_VHT_CHANWIDTH_80P80MHZ:
+            chw = IEEE80211_CHAN_WIDTH_80P80;
+            ni->ni_chan->ic_center_freq1 = cf0;
+            ni->ni_chan->ic_center_freq2 = cf1;
+            break;
+        case IEEE80211_VHT_CHANWIDTH_160MHZ:
+            chw = IEEE80211_CHAN_WIDTH_160;
+            ni->ni_chan->ic_center_freq1 = cf0;
+            break;
+        case IEEE80211_VHT_CHANWIDTH_80MHZ:
+            chw = IEEE80211_CHAN_WIDTH_80;
+            ni->ni_chan->ic_center_freq1 = cf0;
+            /* If needed, adjust based on the newer interop workaround. */
+            if (ccf1) {
+                unsigned int diff = abs(ccf1 - ccf0);
+                if ((diff == 8) && support_160) {
+                    chw = IEEE80211_CHAN_WIDTH_160;
+                    ni->ni_chan->ic_center_freq1 = cf1;
+                } else if ((diff > 8) && support_80_80) {
+                    chw = IEEE80211_CHAN_WIDTH_80P80;
+                    ni->ni_chan->ic_center_freq2 = cf1;
+                }
+            }
+            break;
+        case IEEE80211_VHT_CHANWIDTH_USE_HT:
+        default:
+            return;
+    }
+    
+    ni->ni_chw = chw;
+    
+    ni->ni_flags |= IEEE80211_NODE_VHT;
+    
+    if (ieee80211_node_supports_vht_sgi80(ni)) {
+        ni->ni_flags |= IEEE80211_NODE_VHT_SGI80;
+    }
+    if (ieee80211_node_supports_vht_sgi160(ni)) {
+        ni->ni_flags |= IEEE80211_NODE_VHT_SGI160;
+    }
+    
+    XYLog("%s %d chan_width=%d support_160=%d support_80_80=%d\n", __FUNCTION__, __LINE__, ni->ni_chw, support_160, support_80_80);
+}
+
+void
+ieee80211_he_negotiate(struct ieee80211com *ic, struct ieee80211_node *ni)
+{
+    uint8_t info;
+    uint8_t chw;
+    ni->ni_flags &= ~IEEE80211_NODE_HE;
+    
+    /* Check if we support HE. */
+    if ((ic->ic_modecaps & (1 << IEEE80211_MODE_11AX)) == 0)
+        return;
+
+    /* Check if HE support has been explicitly disabled. */
+    if ((ic->ic_flags & IEEE80211_F_HEON) == 0)
+        return;
+    
+    chw = IEEE80211_CHAN_WIDTH_20;
+    
+    info = ni->ni_he_cap_elem.phy_cap_info[0];
+
+    if (IEEE80211_IS_CHAN_2GHZ(ni->ni_chan)) {
+        if (info & IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_IN_2G)
+            chw = IEEE80211_CHAN_WIDTH_40;
+        else
+            chw = IEEE80211_CHAN_WIDTH_20;
+    }
+
+    if (info & IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G ||
+        info & IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_80PLUS80_MHZ_IN_5G)
+        chw = IEEE80211_CHAN_WIDTH_160;
+    else if (info & IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G)
+        chw = IEEE80211_CHAN_WIDTH_80;
+    
+    ni->ni_chw = chw;
+    ni->ni_flags |= IEEE80211_NODE_HE;
+    
+    XYLog("%s %d chan_width=%d\n", __FUNCTION__, __LINE__, ni->ni_chw);
+}
+
+void
+ieee80211_sta_set_rx_nss(struct ieee80211com *ic, struct ieee80211_node *ni)
+{
+    uint8_t ht_rx_nss = 0, vht_rx_nss = 0, he_rx_nss = 0, rx_nss;
+    bool support_160;
+
+    if (ni->ni_flags & IEEE80211_NODE_HE) {
+        int i;
+        uint8_t rx_mcs_80 = 0, rx_mcs_160 = 0;
+        uint16_t mcs_160_map =
+            le16toh(ni->ni_he_mcs_nss_supp.rx_mcs_160);
+        uint16_t mcs_80_map = le16toh(ni->ni_he_mcs_nss_supp.rx_mcs_80);
+
+        for (i = 7; i >= 0; i--) {
+            uint8_t mcs_160 = (mcs_160_map >> (2 * i)) & 3;
+
+            if (mcs_160 != IEEE80211_VHT_MCS_NOT_SUPPORTED) {
+                rx_mcs_160 = i + 1;
+                break;
+            }
+        }
+        for (i = 7; i >= 0; i--) {
+            uint8_t mcs_80 = (mcs_80_map >> (2 * i)) & 3;
+
+            if (mcs_80 != IEEE80211_VHT_MCS_NOT_SUPPORTED) {
+                rx_mcs_80 = i + 1;
+                break;
+            }
+        }
+
+        support_160 = ni->ni_he_cap_elem.phy_cap_info[0] &
+                  IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
+
+        if (support_160)
+            he_rx_nss = min(rx_mcs_80, rx_mcs_160);
+        else
+            he_rx_nss = rx_mcs_80;
+    }
+
+    if (ni->ni_flags & IEEE80211_NODE_HT) {
+        if (ic->ic_sup_mcs[0])
+            ht_rx_nss++;
+        if (ic->ic_sup_mcs[1])
+            ht_rx_nss++;
+        if (ic->ic_sup_mcs[2])
+            ht_rx_nss++;
+        if (ic->ic_sup_mcs[3])
+            ht_rx_nss++;
+        /* FIXME: consider rx_highest? */
+    }
+
+    if (ni->ni_flags & IEEE80211_NODE_VHT) {
+        int i;
+        uint16_t rx_mcs_map;
+
+        rx_mcs_map = le16toh(ni->ni_vht_mcsinfo.rx_mcs_map);
+
+        for (i = 7; i >= 0; i--) {
+            uint8_t mcs = (rx_mcs_map >> (2 * i)) & 3;
+
+            if (mcs != IEEE80211_VHT_MCS_NOT_SUPPORTED) {
+                vht_rx_nss = i + 1;
+                break;
+            }
+        }
+        /* FIXME: consider rx_highest? */
+    }
+
+    rx_nss = max(vht_rx_nss, ht_rx_nss);
+    rx_nss = max(he_rx_nss, rx_nss);
+    ni->ni_rx_nss = max_t(u8, 1, rx_nss);
+    XYLog("%s ni_rx_nss: %d\n", __FUNCTION__, ni->ni_rx_nss);
 }
 
 void
@@ -719,9 +1002,12 @@ ieee80211_addba_request(struct ieee80211com *ic, struct ieee80211_node *ni,
 		/* immediate BA */
 		ba->ba_params |= IEEE80211_ADDBA_BA_POLICY;
 
-	timeout_add_sec(&ba->ba_to, 1);	/* dot11ADDBAResponseTimeout */
-	IEEE80211_SEND_ACTION(ic, ni, IEEE80211_CATEG_BA,
-	    IEEE80211_ACTION_ADDBA_REQ, tid);
+    /* we are waiting BA response */
+    if ((ic->ic_caps & IEEE80211_C_TX_AMPDU_SETUP_IN_HW) == 0) {
+        timeout_add_sec(&ba->ba_to, 1);	/* dot11ADDBAResponseTimeout */
+        IEEE80211_SEND_ACTION(ic, ni, IEEE80211_CATEG_BA,
+                              IEEE80211_ACTION_ADDBA_REQ, tid);
+    }
 	return 0;
 }
 
@@ -1277,7 +1563,7 @@ justcleanup:
 				    (ni->ni_flags & IEEE80211_NODE_HT) ?
 					" HT enabled" : "");
 			}
-#ifdef AIRPORT
+#if (defined AIRPORT) && (defined USE_APPLE_SUPPLICANT)
 			{
 #else
 			if (!(ic->ic_flags & IEEE80211_F_RSNON)) {
@@ -1289,6 +1575,10 @@ justcleanup:
 				ieee80211_set_link_state(ic, LINK_STATE_UP);
 				ni->ni_assoc_fail = 0;
 			}
+            ni->ni_fails = 0;
+            ni = ieee80211_find_node(ic, ni->ni_macaddr);
+            if (ni)
+                ni->ni_fails = 0;
 			ic->ic_mgt_timer = 0;
 			ieee80211_set_beacon_miss_threshold(ic);
 			(*ifp->if_start)(ifp);

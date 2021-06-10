@@ -968,8 +968,8 @@ ieee80211_create_ibss(struct ieee80211com* ic, struct ieee80211_channel *chan)
         ni->ni_htop1 = IEEE80211_HTPROT_NONE;
         /* Disallow Greenfield mode. None of our drivers support it. */
         ni->ni_htop1 |= IEEE80211_HTOP1_NONGF_STA;
-        if (ic->ic_update_htprot)
-            ic->ic_update_htprot(ic, ni);
+        if (ic->ic_updateprot)
+            ic->ic_updateprot(ic);
         
         /* Configure QoS EDCA parameters. */
         for (aci = 0; aci < EDCA_NUM_AC; aci++) {
@@ -1327,7 +1327,7 @@ ieee80211_node_choose_bss(struct ieee80211com *ic, int bgscan,
              */
             if (ni->ni_fails++ > 2)
                 ieee80211_free_node(ic, ni);
-            DPRINTF(("%s ni->ni_fails==TRUE\n", __FUNCTION__));
+            DPRINTF(("%s %s ni->ni_fails=%d\n", __FUNCTION__, ni->ni_essid, ni->ni_fails));
             continue;
         }
         
@@ -1390,6 +1390,9 @@ ieee80211_end_scan(struct _ifnet *ifp)
     int bgscan = ((ic->ic_flags & IEEE80211_F_BGSCAN) &&
                   ic->ic_opmode == IEEE80211_M_STA &&
                   ic->ic_state == IEEE80211_S_RUN);
+    
+    if (ic->ic_event_handler)
+        (*ic->ic_event_handler)(ic, IEEE80211_EVT_SCAN_DONE, NULL);
     
     if (ifp->if_flags & IFF_DEBUG)
         XYLog("%s: end %s scan\n", ifp->if_xname,
@@ -1494,8 +1497,10 @@ ieee80211_end_scan(struct _ifnet *ifp)
               * may not carry HT information.
               */
              ni = ic->ic_bss;
-             if (ni->ni_flags & IEEE80211_NODE_VHT)
-                 ieee80211_setmode(ic, IEEE80211_MODE_11AC);
+             if (ni->ni_flags & IEEE80211_NODE_HE)
+                 ieee80211_setmode(ic, IEEE80211_MODE_11AX);
+             else if (ni->ni_flags & IEEE80211_NODE_VHT)
+                ieee80211_setmode(ic, IEEE80211_MODE_11AC);
              else if (ni->ni_flags & IEEE80211_NODE_HT)
                  ieee80211_setmode(ic, IEEE80211_MODE_11N);
              else
@@ -1743,7 +1748,7 @@ ieee80211_setup_node(struct ieee80211com *ic,
 {
     int i, s;
     
-    XYLog("%s %s\n", __FUNCTION__, ether_sprintf((u_int8_t *)macaddr));
+    DPRINTF(("%s %s\n", __FUNCTION__, ether_sprintf((u_int8_t *)macaddr)));
     IEEE80211_ADDR_COPY(ni->ni_macaddr, macaddr);
     ieee80211_node_newstate(ni, IEEE80211_STA_CACHE);
     
@@ -2078,7 +2083,7 @@ void ieee80211_ba_free(struct ieee80211_node *ni)
 void
 ieee80211_free_node(struct ieee80211com *ic, struct ieee80211_node *ni)
 {
-    XYLog("%s\n", __FUNCTION__);
+    DPRINTF(("%s %s %s\n", __FUNCTION__, ni->ni_essid, ether_sprintf(ni->ni_bssid)));
     if (ni == ic->ic_bss)
         panic("freeing bss node");
     
@@ -2294,8 +2299,8 @@ ieee80211_clean_nodes(struct ieee80211com *ic, int cache_timeout)
             htop1 |= htprot;
             ic->ic_bss->ni_htop1 = htop1;
             ic->ic_protmode = protmode;
-            if (ic->ic_update_htprot)
-                ic->ic_update_htprot(ic, ic->ic_bss);
+            if (ic->ic_updateprot)
+                ic->ic_updateprot(ic);
         }
     }
     
@@ -2365,6 +2370,18 @@ ieee80211_setup_htcaps(struct ieee80211_node *ni, const uint8_t *data,
         return;
     
     ni->ni_htcaps = (data[0] | (data[1] << 8));
+    ni->ni_htcaps &= le16toh(ni->ni_ic->ic_htcaps |
+                             ~(IEEE80211_HTCAP_CBW20_40 |
+                               IEEE80211_HTCAP_SGI40 |
+                               IEEE80211_HTCAP_SGI20 |
+                               IEEE80211_HTCAP_GF |
+                               IEEE80211_HTCAP_LDPC |
+                               IEEE80211_HTCAP_DSSSCCK40));
+    if (!(ni->ni_ic->ic_htcaps & IEEE80211_HTCAP_TXSTBC))
+        ni->ni_htcaps &= ~IEEE80211_HTCAP_RXSTBC_MASK;
+    if (!(ni->ni_ic->ic_htcaps & IEEE80211_HTCAP_RXSTBC_MASK))
+        ni->ni_htcaps &= ~IEEE80211_HTCAP_TXSTBC;
+    
     ni->ni_ampdu_param = data[2];
     
     memcpy(ni->ni_rxmcs, &data[3], sizeof(ni->ni_rxmcs));
@@ -2433,6 +2450,49 @@ ieee80211_setup_htop(struct ieee80211_node *ni, const uint8_t *data,
     if (isprobe)
         memcpy(ni->ni_basic_mcs, &data[6], sizeof(ni->ni_basic_mcs));
     
+    return 1;
+}
+
+void
+ieee80211_setup_hecaps(struct ieee80211_node *ni, const uint8_t *data,
+                       uint8_t len)
+{
+    struct ieee80211_he_cap_elem *he_cap_ie_elem = (struct ieee80211_he_cap_elem *)data;
+    uint8_t mcs_nss_size, he_ppe_size, he_total_size;
+    
+    mcs_nss_size = ieee80211_he_mcs_nss_size(he_cap_ie_elem);
+    he_ppe_size =
+        ieee80211_he_ppe_size(data[sizeof(ni->ni_he_cap_elem) +
+                        mcs_nss_size],
+                      he_cap_ie_elem->phy_cap_info);
+    he_total_size = sizeof(ni->ni_he_cap_elem) + mcs_nss_size +
+            he_ppe_size;
+    
+    if (len < he_total_size)
+        return;
+    
+    memcpy(&ni->ni_he_cap_elem, data, sizeof(ni->ni_he_cap_elem));
+    
+    /* HE Tx/Rx HE MCS NSS Support Field */
+    memcpy(&ni->ni_he_mcs_nss_supp,
+           &data[sizeof(ni->ni_he_cap_elem)], mcs_nss_size);
+    
+    /* Check if there are (optional) PPE Thresholds */
+    if (ni->ni_he_cap_elem.phy_cap_info[6] &
+        IEEE80211_HE_PHY_CAP6_PPE_THRESHOLD_PRESENT)
+        memcpy(ni->ni_ppe_thres,
+               &data[sizeof(ni->ni_he_cap_elem) + mcs_nss_size],
+               he_ppe_size);
+}
+
+int
+ieee80211_setup_heop(struct ieee80211_node *ni, const uint8_t *data,
+                     uint8_t len)
+{
+    struct ieee80211_he_operation *he_op_ie = (struct ieee80211_he_operation *)data;
+    
+    ni->ni_he_oper_params = le32toh(he_op_ie->he_oper_params);
+    ni->ni_he_oper_nss_set = le16toh(he_op_ie->he_mcs_nss_set);
     return 1;
 }
 
@@ -2568,8 +2628,8 @@ ieee80211_node_join_ht(struct ieee80211com *ic, struct ieee80211_node *ni)
         htop1 &= ~IEEE80211_HTOP1_PROT_MASK;
         htop1 |= IEEE80211_HTPROT_NONHT_MIXED;
         ic->ic_bss->ni_htop1 = htop1;
-        if (ic->ic_update_htprot)
-            ic->ic_update_htprot(ic, ic->ic_bss);
+        if (ic->ic_updateprot)
+            ic->ic_updateprot(ic);
     }
 }
 

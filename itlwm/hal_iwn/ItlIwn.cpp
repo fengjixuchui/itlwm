@@ -160,6 +160,12 @@ clearScanningFlags()
     com.sc_flags &= ~(IWN_FLAG_SCANNING | IWN_FLAG_BGSCAN);
 }
 
+IOReturn ItlIwn::
+setMulticastList(IOEthernetAddress *addr, int count)
+{
+    return kIOReturnSuccess;
+}
+
 const char *ItlIwn::
 getFirmwareVersion()
 {
@@ -490,22 +496,19 @@ iwn_attach(struct iwn_softc *sc, struct pci_attach_args *pa)
     if (sc->sc_flags & IWN_FLAG_HAS_11N) {
         ic->ic_caps |= (IEEE80211_C_QOS | IEEE80211_C_TX_AMPDU | IEEE80211_C_AMSDU_IN_AMPDU);
         /* Set HT capabilities. */
-        ic->ic_htcaps = IEEE80211_HTCAP_SGI20;
-        ic->ic_htcaps |= (IEEE80211_HTCAP_SMPS_DIS << IEEE80211_HTCAP_SMPS_SHIFT);
-#ifdef notyet
-        ic->ic_htcaps |=
+        ic->ic_htcaps = IEEE80211_HTCAP_SGI20 |
+                        IEEE80211_HTCAP_CBW20_40 |
+                        IEEE80211_HTCAP_SGI40;
 #if IWN_RBUF_SIZE == 8192
-            IEEE80211_HTCAP_AMSDU7935 |
+        ic->ic_htcaps |=
+            IEEE80211_HTCAP_AMSDU7935;
 #endif
-            IEEE80211_HTCAP_CBW20_40 |
-            IEEE80211_HTCAP_SGI40;
         if (sc->hw_type != IWN_HW_REV_TYPE_4965)
             ic->ic_htcaps |= IEEE80211_HTCAP_GF;
         if (sc->hw_type == IWN_HW_REV_TYPE_6050)
-            ic->ic_htcaps |= IEEE80211_HTCAP_SMPS_DYN;
+            ic->ic_htcaps |= IEEE80211_HTCAP_SMPS_DYN << IEEE80211_HTCAP_SMPS_SHIFT;
         else
-            ic->ic_htcaps |= IEEE80211_HTCAP_SMPS_DIS;
-#endif    /* notyet */
+            ic->ic_htcaps |= IEEE80211_HTCAP_SMPS_DIS << IEEE80211_HTCAP_SMPS_SHIFT;
     }
 
     /* Set supported legacy rates. */
@@ -558,11 +561,13 @@ iwn_attach(struct iwn_softc *sc, struct pci_attach_args *pa)
     ic->ic_updateedca = iwn_updateedca;
     ic->ic_set_key = iwn_set_key;
     ic->ic_delete_key = iwn_delete_key;
-    ic->ic_update_htprot = iwn_update_htprot;
+    ic->ic_updateprot = iwn_updateprot;
+    ic->ic_updateslot = iwn_updateslot;
     ic->ic_ampdu_rx_start = iwn_ampdu_rx_start;
     ic->ic_ampdu_rx_stop = iwn_ampdu_rx_stop;
     ic->ic_ampdu_tx_start = iwn_ampdu_tx_start;
     ic->ic_ampdu_tx_stop = iwn_ampdu_tx_stop;
+    ic->ic_update_chw = iwn_update_chw;
 
     /* Override 802.11 state transition machine. */
     sc->sc_newstate = ic->ic_newstate;
@@ -1787,7 +1792,6 @@ iwn_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
     struct _ifnet *ifp = &ic->ic_if;
     struct iwn_softc *sc = (struct iwn_softc *)ifp->if_softc;
     struct ieee80211_node *ni = ic->ic_bss;
-    struct iwn_node *wn = (struct iwn_node *)ni;
     ItlIwn *that = container_of(sc, ItlIwn, com);
     int error;
 
@@ -1800,7 +1804,6 @@ iwn_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
             ieee80211_stop_ampdu_tx(ic, ni, -1);
             ieee80211_ba_del(ni);
         }
-        ieee80211_mira_node_free(&wn->mn);
         timeout_del(&sc->calib_to);
         sc->calib.state = IWN_CALIB_STATE_INIT;
         if (sc->sc_flags & IWN_FLAG_BGSCAN)
@@ -2268,103 +2271,97 @@ iwn_rx_done(struct iwn_softc *sc, struct iwn_rx_desc *desc,
 }
 
 void ItlIwn::
-iwn_mira_choose(struct iwn_softc *sc, struct ieee80211_node *ni)
+iwn_ra_choose(struct iwn_softc *sc, struct ieee80211_node *ni)
 {
     struct ieee80211com *ic = &sc->sc_ic;
     struct iwn_node *wn = (struct iwn_node *)ni;
-    int best_mcs = ieee80211_mira_get_best_mcs(&wn->mn);
+    int old_txmcs = ni->ni_txmcs;
 
-    ieee80211_mira_choose(&wn->mn, ic, ni);
+    ieee80211_ra_choose(&wn->rn, ic, ni);
 
-    /*
-     * Update firmware's LQ retry table if MiRA has chosen a new MCS.
-     *
-     * We only need to do this if the best MCS has changed because
-     * we ask firmware to use a fixed MCS while MiRA is probing a
-     * candidate MCS.
-     * While not probing we ask firmware to retry at lower rates in case
-     * Tx at the newly chosen best MCS ends up failing, and then report
-     * any resulting Tx retries to MiRA in order to trigger probing.
-     */
-    if (best_mcs != ieee80211_mira_get_best_mcs(&wn->mn))
+    /* Update firmware's LQ retry table if RA has chosen a new MCS. */
+    if (ni->ni_txmcs != old_txmcs)
         iwn_set_link_quality(sc, ni);
 }
 
 void ItlIwn::
 iwn_ampdu_rate_control(struct iwn_softc *sc, struct ieee80211_node *ni,
-    struct iwn_tx_ring *txq, int tid, uint16_t seq, uint16_t ssn)
+    struct iwn_tx_ring *txq, uint16_t seq, uint16_t ssn)
 {
     struct ieee80211com *ic = &sc->sc_ic;
     struct iwn_node *wn = (struct iwn_node *)ni;
-    struct ieee80211_tx_ba *ba = &ni->ni_tx_ba[tid];
-    int min_ampdu_id, max_ampdu_id, id;
     int idx, end_idx;
-
-    /* Determine the min/max IDs we assigned to AMPDUs in this range. */
-    idx = IWN_AGG_SSN_TO_TXQ_IDX(seq);
-    end_idx = IWN_AGG_SSN_TO_TXQ_IDX(ssn);
-    min_ampdu_id = txq->data[idx].ampdu_id;
-    max_ampdu_id = min_ampdu_id;
-    while (idx != end_idx) {
-        struct iwn_tx_data *txdata = &txq->data[idx];
-
-        if (txdata->m != NULL) {
-            if (min_ampdu_id > txdata->ampdu_id)
-                min_ampdu_id = txdata->ampdu_id;
-            if (max_ampdu_id < txdata->ampdu_id)
-                max_ampdu_id = txdata->ampdu_id;
-        }
-
-        idx = (idx + 1) % IWN_TX_RING_COUNT;
-    }
 
     /*
      * Update Tx rate statistics for A-MPDUs before firmware's BA window.
      */
-    for (id = min_ampdu_id; id <= max_ampdu_id; id++) {
-        int have_ack = 0, bit = 0;
-        idx = IWN_AGG_SSN_TO_TXQ_IDX(seq);
-        end_idx = IWN_AGG_SSN_TO_TXQ_IDX(ssn);
-        wn->mn.agglen = 0;
-        wn->mn.ampdu_size = 0;
-        while (idx != end_idx) {
-            struct iwn_tx_data *txdata = &txq->data[idx];
-            uint16_t s = (seq + bit) & 0xfff;
+    idx = IWN_AGG_SSN_TO_TXQ_IDX(seq);
+    end_idx = IWN_AGG_SSN_TO_TXQ_IDX(ssn);
+    while (idx != end_idx) {
+        struct iwn_tx_data *txdata = &txq->data[idx];
+        if (txdata->m != NULL && txdata->ampdu_nframes > 1) {
             /*
              * We can assume that this subframe has been ACKed
              * because ACK failures come as single frames and
              * before failing an A-MPDU subframe the firmware
              * sends it as a single frame at least once.
-             *
-             * However, when this A-MPDU was transmitted we
-             * learned how many subframes it contained.
-             * So if firmware isn't reporting all subframes now
-             * we can deduce an ACK failure for missing frames.
              */
-            if (txdata->m != NULL && txdata->ampdu_id == id &&
-                txdata->ampdu_txmcs == ni->ni_txmcs &&
-                txdata->ampdu_nframes > 0 &&
-                (SEQ_LT(ba->ba_winend, s) ||
-                (ba->ba_bitmap & (1 << bit)) == 0)) {
-                have_ack++;
-                wn->mn.frames++;
-                wn->mn.agglen++;
-                wn->mn.ampdu_size = txdata->ampdu_size / txdata->ampdu_nframes;
-                if (txdata->retries > 1)
-                    wn->mn.retries++;
-                if (!SEQ_LT(ba->ba_winend, s))
-                    ieee80211_output_ba_record_ack(ic, ni,
-                        tid, s);
-            }
-
-            idx = (idx + 1) % IWN_TX_RING_COUNT;
-            bit++;
+            ieee80211_ra_add_stats_ht(&wn->rn, ic, ni,
+                                      txdata->ampdu_txmcs, 1, 0);
+            
+            /* Report this frame only once. */
+            txdata->ampdu_nframes = 0;
         }
-
-        if (have_ack > 0) {
-            iwn_mira_choose(sc, ni);
-        }
+        
+        idx = (idx + 1) % IWN_TX_RING_COUNT;
     }
+    
+    iwn_ra_choose(sc, ni);
+}
+
+void ItlIwn::
+iwn_ht_single_rate_control(struct iwn_softc *sc, struct ieee80211_node *ni,
+    uint8_t rate, uint8_t rflags, uint8_t ackfailcnt, int txfail)
+{
+    struct ieee80211com *ic = &sc->sc_ic;
+    struct iwn_node *wn = (struct iwn_node *)ni;
+    int mcs = rate;
+    const struct ieee80211_ra_rate *rs =
+    ieee80211_ra_get_rateset(&wn->rn, ic, ni, rate);
+    unsigned int retries = 0, i;
+    
+    /*
+     * Ignore Tx reports which don't match our last LQ command.
+     */
+    if (rate != ni->ni_txmcs) {
+        if (++wn->lq_rate_mismatch > 15) {
+            /* Try to sync firmware with driver. */
+            iwn_set_link_quality(sc, ni);
+            wn->lq_rate_mismatch = 0;
+        }
+        return;
+    }
+    
+    wn->lq_rate_mismatch = 0;
+    
+    /*
+     * Firmware has attempted rates in this rate set in sequence.
+     * Retries at a basic rate are counted against the minimum MCS.
+     */
+    for (i = 0; i < ackfailcnt; i++) {
+        if (mcs > rs->min_mcs) {
+            ieee80211_ra_add_stats_ht(&wn->rn, ic, ni, mcs, 1, 1);
+            mcs--;
+        } else
+            retries++;
+    }
+    
+    if (txfail && ackfailcnt == 0)
+        ieee80211_ra_add_stats_ht(&wn->rn, ic, ni, mcs, 1, 1);
+    else
+        ieee80211_ra_add_stats_ht(&wn->rn, ic, ni, mcs, retries + 1, retries);
+    
+    iwn_ra_choose(sc, ni);
 }
 
 /*
@@ -2426,23 +2423,23 @@ iwn_rx_compressed_ba(struct iwn_softc *sc, struct iwn_rx_desc *desc,
      * have been acked.
      */
     ssn = le16toh(cba->ssn);
+    
+    if (SEQ_LT(ssn, ba->ba_winstart))
+        return;
 
     /* Skip rate control if our Tx rate is fixed. */
     if (ic->ic_fixed_mcs == -1)
-        iwn_ampdu_rate_control(sc, ni, txq, cba->tid, ba->ba_winstart,
-            ssn);
+        iwn_ampdu_rate_control(sc, ni, txq, ba->ba_winstart, ssn);
 
     /*
      * SSN corresponds to the first (perhaps not yet transmitted) frame
      * in firmware's BA window. Firmware is not going to retransmit any
      * frames before its BA window so mark them all as done.
      */
-    if (SEQ_LT(ba->ba_winstart, ssn)) {
-        ieee80211_output_ba_move_window(ic, ni, cba->tid, ssn);
-        iwn_ampdu_txq_advance(sc, txq, qid,
-            IWN_AGG_SSN_TO_TXQ_IDX(ssn));
-        iwn_clear_oactive(sc, txq);
-    }
+    ieee80211_output_ba_move_window(ic, ni, cba->tid, ssn);
+    iwn_ampdu_txq_advance(sc, txq, qid,
+                          IWN_AGG_SSN_TO_TXQ_IDX(ssn));
+    iwn_clear_oactive(sc, txq);
 }
 
 /*
@@ -2593,9 +2590,9 @@ iwn_ampdu_txq_advance(struct iwn_softc *sc, struct iwn_tx_ring *txq, int qid,
 /*
  * Handle A-MPDU Tx queue status report.
  * Tx failures come as single frames (perhaps out of order), and before failing
- * an A-MPDU subframe the firmware transmits it as a single frame at least once
- * and reports Tx success/failure here. Frames successfully transmitted in an
- * A-MPDU are completed when a compressed block ack notification is received.
+ * an A-MPDU subframe the firmware transmits it as a single frame at least once.
+ * Frames successfully transmitted in an A-MPDU are completed when a compressed
+ * block ack notification is received.
  */
 void ItlIwn::
 iwn_ampdu_tx_done(struct iwn_softc *sc, struct iwn_tx_ring *txq,
@@ -2608,7 +2605,6 @@ iwn_ampdu_tx_done(struct iwn_softc *sc, struct iwn_tx_ring *txq,
     int tid = desc->qid - sc->first_agg_txq;
     struct iwn_tx_data *txdata = &txq->data[desc->idx];
     struct ieee80211_node *ni = txdata->ni;
-    struct iwn_node *wn = (struct iwn_node *)ni;
     int txfail = (status != IWN_TX_STATUS_SUCCESS &&
         status != IWN_TX_STATUS_DIRECT_DONE);
     struct ieee80211_tx_ba *ba;
@@ -2620,76 +2616,30 @@ iwn_ampdu_tx_done(struct iwn_softc *sc, struct iwn_tx_ring *txq,
         return;
 
     if (nframes > 1) {
-        int ampdu_id, have_ampdu_id = 0, ampdu_size = 0;
         int i;
-
-        /* Compute the size of this A-MPDU. */
-        for (i = 0; i < nframes; i++) {
-            uint8_t qid = agg_status[i].qid;
-            uint8_t idx = agg_status[i].idx;
-
-            if (qid != desc->qid)
-                continue;
-
-            txdata = &txq->data[idx];
-            if (txdata->ni == NULL)
-                continue;
-
-            ampdu_size += txdata->totlen + IEEE80211_CRC_LEN;
-        }
-
+        
         /*
-         * For each subframe collect Tx status, retries, and Tx rate.
-         * (The Tx rate is the same for all subframes in this batch.)
+         * Collect information about this A-MPDU.
          */
         for (i = 0; i < nframes; i++) {
             uint8_t qid = agg_status[i].qid;
             uint8_t idx = agg_status[i].idx;
             uint16_t txstatus = (le16toh(agg_status[i].status) &
-                IWN_AGG_TX_STATUS_MASK);
-            uint16_t trycnt = (le16toh(agg_status[i].status) &
-                IWN_AGG_TX_TRY) >> IWN_AGG_TX_TRY_SHIFT;
-
+                                 IWN_AGG_TX_STATUS_MASK);
+            
+            if (txstatus != IWN_AGG_TX_STATE_TRANSMITTED)
+                continue;
+            
             if (qid != desc->qid)
                 continue;
-
+            
             txdata = &txq->data[idx];
             if (txdata->ni == NULL)
                 continue;
-
-            if (rflags & IWN_RFLAG_MCS)
-                txdata->ampdu_txmcs = rate;
-            if (txstatus != IWN_AGG_TX_STATE_TRANSMITTED) {
-                txdata->txfail++;
-                ifp->netStat->outputErrors++;
-                XYLog("%s %d OUTPUT_ERROR status=%d\n", __FUNCTION__, __LINE__, txstatus);
-            }
-            if (trycnt > 1)
-                txdata->retries++;
-
-            /*
-             * Assign a common ID to all subframes of this A-MPDU.
-             * This ID will be used during Tx rate control to
-             * infer the ACK status of individual subframes.
-             */
-            if (!have_ampdu_id) {
-                wn = (struct iwn_node *)txdata->ni;
-                ampdu_id = wn->next_ampdu_id++;
-                have_ampdu_id = 1;
-            }
-            txdata->ampdu_id = ampdu_id;
-
-            /*
-             * We will also need to know the total number of
-             * subframes and the size of this A-MPDU. We store
-             * this redundantly on each subframe because firmware
-             * only reports acknowledged subframes via compressed
-             * block-ack notification. This way we will know what
-             * the total number of subframes and size were even if
-             * just one of these subframes gets acknowledged.
-             */
+            
+            /* The Tx rate was the same for all subframes. */
+            txdata->ampdu_txmcs = rate;
             txdata->ampdu_nframes = nframes;
-            txdata->ampdu_size = ampdu_size;
         }
         return;
     }
@@ -2700,51 +2650,44 @@ iwn_ampdu_tx_done(struct iwn_softc *sc, struct iwn_tx_ring *txq,
     ba = &ni->ni_tx_ba[tid];
     if (ba->ba_state != IEEE80211_BA_AGREED)
         return;
+    if (SEQ_LT(ssn, ba->ba_winstart))
+        return;
 
     /* This was a final single-frame Tx attempt for frame SSN-1. */
     seq = (ssn - 1) & 0xfff;
 
     /*
      * Skip rate control if our Tx rate is fixed.
-     * Don't report frames to MiRA which were sent at a different
-     * Tx rate than ni->ni_txmcs.
      */
-    if (ic->ic_fixed_mcs == -1 && txdata->txmcs == ni->ni_txmcs) {
-        wn->mn.frames++;
-        wn->mn.agglen = 1;
-        wn->mn.ampdu_size = txdata->totlen + IEEE80211_CRC_LEN;
-        if (ackfailcnt > 0)
-            wn->mn.retries++;
-        if (txfail)
-            wn->mn.txfail++;
-        iwn_mira_choose(sc, ni);
+    if (ic->ic_fixed_mcs == -1) {
+        if (txdata->ampdu_nframes > 1) {
+            struct iwn_node *wn = (struct iwn_node *)ni;
+            /*
+             * This frame was once part of an A-MPDU.
+             * Report one failed A-MPDU Tx attempt.
+             * The firmware might have made several such
+             * attempts but we don't keep track of this.
+             */
+            ieee80211_ra_add_stats_ht(&wn->rn, ic, ni,
+                                      txdata->ampdu_txmcs, 1, 1);
+        }
+        
+        /* Report the final single-frame Tx attempt. */
+        if (rflags & IWN_RFLAG_MCS)
+            iwn_ht_single_rate_control(sc, ni, rate, rflags,
+                                       ackfailcnt, txfail);
     }
 
     if (txfail)
         ieee80211_tx_compressed_bar(ic, ni, tid, ssn);
-    else if (!SEQ_LT(seq, ba->ba_winstart)) {
-        /*
-         * Move window forward if SEQ lies beyond end of window,
-         * otherwise we can't record the ACK for this frame.
-         * Non-acked frames which left holes in the bitmap near
-         * the beginning of the window must be discarded.
-         */
-        uint16_t s = seq;
-        while (SEQ_LT(ba->ba_winend, s)) {
-            ieee80211_output_ba_move_window(ic, ni, tid, s);
-            iwn_ampdu_txq_advance(sc, txq, desc->qid,
-                IWN_AGG_SSN_TO_TXQ_IDX(s));
-            s = (s + 1) % 0xfff;
-        }
-        /* SEQ should now be within window; set corresponding bit. */
-        ieee80211_output_ba_record_ack(ic, ni, tid, seq);
-    }
 
-    /* Move window forward up to the first hole in the bitmap. */
-    ieee80211_output_ba_move_window_to_first_unacked(ic, ni, tid, ssn);
-    iwn_ampdu_txq_advance(sc, txq, desc->qid,
-        IWN_AGG_SSN_TO_TXQ_IDX(ba->ba_winstart));
-
+    /*
+     * SSN corresponds to the first (perhaps not yet transmitted) frame
+     * in firmware's BA window. Firmware is not going to retransmit any
+     * frames before its BA window so mark them all as done.
+     */
+    ieee80211_output_ba_move_window(ic, ni, tid, ssn);
+    iwn_ampdu_txq_advance(sc, txq, desc->qid, IWN_AGG_SSN_TO_TXQ_IDX(ssn));
     iwn_clear_oactive(sc, txq);
 }
 
@@ -2786,9 +2729,11 @@ iwn4965_tx_done(struct iwn_softc *sc, struct iwn_rx_desc *desc,
         /* XXX 4965 does not report byte count */
         struct iwn_tx_data *txdata = &ring->data[desc->idx];
         uint16_t framelen = txdata->totlen + IEEE80211_CRC_LEN;
+        int txfail = (status != IWN_TX_STATUS_SUCCESS &&
+                      status != IWN_TX_STATUS_DIRECT_DONE);
 
-        that->iwn_tx_done(sc, desc, stat->ackfailcnt, stat->rate, status,
-            desc->qid, framelen);
+        that->iwn_tx_done(sc, desc, stat->ackfailcnt, stat->rate,
+                          stat->rflags, txfail, desc->qid, framelen);
     } else {
         memcpy(&ssn, &stat->stat.status + stat->nframes, sizeof(ssn));
         ssn = le32toh(ssn) & 0xfff;
@@ -2830,11 +2775,13 @@ iwn5000_tx_done(struct iwn_softc *sc, struct iwn_rx_desc *desc,
 
     /* If this was not an aggregated frame, complete it now. */
     if (desc->qid < sc->first_agg_txq) {
+        int txfail = (status != IWN_TX_STATUS_SUCCESS &&
+                      status != IWN_TX_STATUS_DIRECT_DONE);
         /* Reset TX scheduler slot. */
         iwn5000_reset_sched(sc, desc->qid, desc->idx);
 
-        that->iwn_tx_done(sc, desc, stat->ackfailcnt, stat->rate, status,
-            desc->qid, letoh16(stat->len));
+        that->iwn_tx_done(sc, desc, stat->ackfailcnt, stat->rate,
+                          stat->rflags, txfail, desc->qid, letoh16(stat->len));
     } else {
         memcpy(&ssn, &stat->stat.status + stat->nframes, sizeof(ssn));
         ssn = le32toh(ssn) & 0xfff;
@@ -2857,11 +2804,8 @@ iwn_tx_done_free_txdata(struct iwn_softc *sc, struct iwn_tx_data *data)
     ieee80211_release_node(ic, data->ni);
     data->ni = NULL;
     data->totlen = 0;
-    data->retries = 0;
-    data->txfail = 0;
-    data->txmcs = 0;
+    data->ampdu_nframes = 0;
     data->ampdu_txmcs = 0;
-    data->txrate = 0;
 }
 
 void ItlIwn::
@@ -2876,6 +2820,9 @@ iwn_clear_oactive(struct iwn_softc *sc, struct iwn_tx_ring *ring)
             ifq_clr_oactive(&ifp->if_snd);
             (*ifp->if_start)(ifp);
         }
+#ifdef __PRIVATE_SPI__
+        ifp->iface->signalOutputThread();
+#endif
     }
 }
 
@@ -2885,41 +2832,42 @@ iwn_clear_oactive(struct iwn_softc *sc, struct iwn_tx_ring *ring)
  */
 void ItlIwn::
 iwn_tx_done(struct iwn_softc *sc, struct iwn_rx_desc *desc,
-    uint8_t ackfailcnt, uint8_t rate, int status, int qid, uint16_t len)
+    uint8_t ackfailcnt, uint8_t rate, uint8_t rflags, int txfail,
+    int qid, uint16_t len)
 {
     struct ieee80211com *ic = &sc->sc_ic;
     struct _ifnet *ifp = &ic->ic_if;
     struct iwn_tx_ring *ring = &sc->txq[qid];
     struct iwn_tx_data *data = &ring->data[desc->idx];
     struct iwn_node *wn = (struct iwn_node *)data->ni;
-    int txfail = (status != IWN_TX_STATUS_SUCCESS &&
-        status != IWN_TX_STATUS_DIRECT_DONE);
 
     if (data->ni == NULL)
         return;
 
     if (data->ni->ni_flags & IEEE80211_NODE_HT) {
         if (ic->ic_state == IEEE80211_S_RUN &&
-            ic->ic_fixed_mcs == -1 &&
-            data->txmcs == data->ni->ni_txmcs) {
-            wn->mn.frames++;
-            wn->mn.ampdu_size = len;
-            wn->mn.agglen = 1;
-            if (ackfailcnt > 0)
-                wn->mn.retries++;
-            if (txfail)
-                wn->mn.txfail++;
-            iwn_mira_choose(sc, data->ni);
+            ic->ic_fixed_mcs == -1 && (rflags & IWN_RFLAG_MCS)) {
+            iwn_ht_single_rate_control(sc, data->ni, rate, rflags,
+                                       ackfailcnt, txfail);
         }
-    } else if (data->txrate == data->ni->ni_txrate) {
-        wn->amn.amn_txcnt++;
-        if (ackfailcnt > 0)
-            wn->amn.amn_retrycnt++;
-        if (txfail)
-            wn->amn.amn_retrycnt++;
+    } else {
+        if (rate != data->ni->ni_txrate) {
+            if (++wn->lq_rate_mismatch > 15) {
+                /* Try to sync firmware with driver. */
+                iwn_set_link_quality(sc, data->ni);
+                wn->lq_rate_mismatch = 0;
+            }
+        } else {
+            wn->lq_rate_mismatch = 0;
+            
+            wn->amn.amn_txcnt++;
+            if (ackfailcnt > 0)
+                wn->amn.amn_retrycnt++;
+            if (txfail)
+                wn->amn.amn_retrycnt++;
+        }
     }
     if (txfail) {
-        XYLog("%s %d OUTPUT_ERROR status=%d\n", __FUNCTION__, __LINE__, status);
         ifp->netStat->outputErrors++;
     }
 
@@ -3590,13 +3538,8 @@ iwn_tx(struct iwn_softc *sc, mbuf_t m, struct ieee80211_node *ni)
 
     /* Check if frame must be protected using RTS/CTS or CTS-to-self. */
     if (!IEEE80211_IS_MULTICAST(wh->i_addr1)) {
-        int rtsthres = ic->ic_rtsthreshold;
-        if (ni->ni_flags & IEEE80211_NODE_HT)
-            rtsthres = ieee80211_mira_get_rts_threshold(&wn->mn,
-                ic, ni, totlen + IEEE80211_CRC_LEN);
-
         /* NB: Group frames are sent using CCK in 802.11b/g/n (2GHz). */
-        if (totlen + IEEE80211_CRC_LEN > rtsthres) {
+        if (totlen + IEEE80211_CRC_LEN > ic->ic_rtsthreshold) {
             flags |= IWN_TX_NEED_RTS;
         } else if ((ic->ic_flags & IEEE80211_F_USEPROT) &&
             IWN_RIDX_IS_OFDM(ridx)) {
@@ -3654,8 +3597,16 @@ iwn_tx(struct iwn_softc *sc, mbuf_t m, struct ieee80211_node *ni)
         rinfo->ht_plcp != IWN_RATE_HT_SISO_MCS_INV_PLCP) {
         tx->plcp = rinfo->ht_plcp;
         tx->rflags = IWN_RFLAG_MCS;
-        if (ni->ni_htcaps & IEEE80211_HTCAP_SGI20)
+        if (ieee80211_node_supports_ht_sgi20(ni))
             tx->rflags |= IWN_RFLAG_SGI;
+        if (ni->ni_chw == IEEE80211_CHAN_WIDTH_40) {
+            tx->rflags |= IWN_RFLAG_HT40;
+            if (ieee80211_node_supports_ht_sgi40(ni)) {
+                tx->rflags |= IWN_RFLAG_SGI;
+            }
+        }
+        if (ni->ni_htcaps & IEEE80211_HTCAP_GF)
+            tx->rflags |= IWN_RFLAG_GREENFIELD;
         if (iwn_is_mimo_ht_plcp(rinfo->ht_plcp))
             tx->rflags |= IWN_RFLAG_ANT(sc->txchainmask);
         else
@@ -3668,15 +3619,9 @@ iwn_tx(struct iwn_softc *sc, mbuf_t m, struct ieee80211_node *ni)
         else
             tx->rflags = 0;
     }
-    /*
-     * Keep the Tx rate constant while mira is probing, or if this is
-     * an aggregation queue in which case a fixed Tx rate works around
-     * FIFO_UNDERRUN Tx errors.
-     */
-    if (tx->id == sc->broadcast_id || ieee80211_mira_is_probing(&wn->mn) ||
-        qid >= sc->first_agg_txq ||
-        ic->ic_fixed_mcs != -1 || ic->ic_fixed_rate != -1) {
-        /* Group or management frame, or probing, or fixed Tx rate. */
+    if (tx->id == sc->broadcast_id || ic->ic_fixed_mcs != -1 ||
+        ic->ic_fixed_rate != -1) {
+        /* Group or management frame, or fixed Tx rate. */
         tx->linkq = 0;
         /* XXX Alternate between antenna A and B? */
         txant = IWN_LSB(sc->txchainmask);
@@ -3731,8 +3676,6 @@ iwn_tx(struct iwn_softc *sc, mbuf_t m, struct ieee80211_node *ni)
 
     data->m = m;
     data->ni = ni;
-    data->txmcs = ni->ni_txmcs;
-    data->txrate = ni->ni_txrate;
     data->ampdu_txmcs = ni->ni_txmcs; /* updated upon Tx interrupt */
 
     DPRINTFN(4, ("sending data: qid=%d idx=%d len=%d nsegs=%d\n",
@@ -3772,7 +3715,7 @@ iwn_tx(struct iwn_softc *sc, mbuf_t m, struct ieee80211_node *ni)
 
     /* Mark TX ring as full if we reach a certain threshold. */
     if (++ring->queued > IWN_TX_RING_HIMARK) {
-        XYLog("%s sc->qfullmsk is FULL ring->cur=%d ring->queued=%d\n", __FUNCTION__, ring->cur, ring->queued);
+//        XYLog("%s sc->qfullmsk is FULL qid=%d ring->cur=%d ring->queued=%d\n", __FUNCTION__, ring->qid, ring->cur, ring->queued);
         sc->qfullmsk |= 1 << ring->qid;
     }
 
@@ -3813,7 +3756,10 @@ _iwn_start_task(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3
             ni = (struct ieee80211_node *)mbuf_pkthdr_rcvif(m);
             goto sendit;
         }
-        if (ic->ic_state != IEEE80211_S_RUN ||
+        if (
+#ifndef AIRPORT
+            ic->ic_state != IEEE80211_S_RUN ||
+#endif
             (ic->ic_xflags & IEEE80211_F_TX_MGMT_ONLY))
             break;
 
@@ -4063,7 +4009,7 @@ iwn_set_link_quality(struct iwn_softc *sc, struct ieee80211_node *ni)
     struct iwn_cmd_link_quality linkq;
     struct ieee80211_rateset *rs = &ni->ni_rates;
     uint8_t txant;
-    int i, ridx, ridx_min, ridx_max, j, sgi_ok = 0, mimo, tab = 0, rflags = 0;
+    int i, ridx, ridx_min, ridx_max, j, sgi_ok = 0, is_40mhz = 0, gf = 0, mimo, tab = 0, rflags = 0;
 
     /* Use the first valid TX antenna. */
     txant = IWN_LSB(sc->txchainmask);
@@ -4079,11 +4025,23 @@ iwn_set_link_quality(struct iwn_softc *sc, struct ieee80211_node *ni)
     if (ic->ic_flags & IEEE80211_F_USEPROT)
         if (sc->hw_type != IWN_HW_REV_TYPE_4965)
             linkq.flags |= IWN_LINK_QUAL_FLAGS_SET_STA_TLC_RTS;
+
+    if (ieee80211_node_supports_ht_sgi20(ni)) {
+        sgi_ok = 1;
+    }
+    
+    if (ni->ni_chw == IEEE80211_CHAN_WIDTH_40) {
+        is_40mhz = 1;
+        if (ieee80211_node_supports_ht_sgi40(ni)) {
+            sgi_ok = 1;
+        } else {
+            sgi_ok = 0;
+        }
+    }
     
     if ((ni->ni_flags & IEEE80211_NODE_HT) &&
-        ieee80211_node_supports_ht_sgi20(ni)) {
-        ni->ni_flags |= IEEE80211_NODE_HT_SGI20;
-        sgi_ok = 1;
+        ni->ni_htcaps & IEEE80211_HTCAP_GF) {
+        gf = 1;
     }
     
     /*
@@ -4091,8 +4049,8 @@ iwn_set_link_quality(struct iwn_softc *sc, struct ieee80211_node *ni)
      * in descending order, i.e. with the node's current TX rate first.
      * In cases where throughput of an HT rate corresponds to a legacy
      * rate it makes no sense to add both. We rely on the fact that
-     * iwm_rates is laid out such that equivalent HT/legacy rates share
-     * the same IWM_RATE_*_INDEX value. Also, rates not applicable to
+     * iwn_rates is laid out such that equivalent HT/legacy rates share
+     * the same IWN_RATE_*_INDEX value. Also, rates not applicable to
      * legacy/HT are assumed to be marked with an 'invalid' PLCP value.
      */
     j = 0;
@@ -4122,6 +4080,10 @@ iwn_set_link_quality(struct iwn_softc *sc, struct ieee80211_node *ni)
                     rflags |= IWN_RFLAG_MCS;
                     if (sgi_ok)
                         rflags |= IWN_RFLAG_SGI;
+                    if (is_40mhz)
+                        rflags |= IWN_RFLAG_HT40;
+                    if (gf)
+                        rflags |= IWN_RFLAG_GREENFIELD;
                     break;
                 }
             }
@@ -4135,7 +4097,7 @@ iwn_set_link_quality(struct iwn_softc *sc, struct ieee80211_node *ni)
             }
         }
         
-        if (tab == 0)
+        if (tab == 0 && rflags == 0)
             continue;
         
         if (iwn_is_mimo_ht_plcp(ht_plcp))
@@ -4146,6 +4108,7 @@ iwn_set_link_quality(struct iwn_softc *sc, struct ieee80211_node *ni)
         if (IWN_RIDX_IS_CCK(ridx))
             rflags |= IWN_RFLAG_CCK;
 
+        XYLog("lq.retry[%d].plcp = 0x%x, lq.retry[i].rflags = 0x%x\n", j, tab, rflags);
         linkq.retry[j].plcp = tab;
         linkq.retry[j].rflags = rflags;
         j++;
@@ -4160,6 +4123,7 @@ iwn_set_link_quality(struct iwn_softc *sc, struct ieee80211_node *ni)
         if (IWN_RIDX_IS_CCK(ridx_min))
             rflags |= IWN_RFLAG_CCK;
         rflags |= IWN_RFLAG_ANT(txant);
+        XYLog("lq.retry[%d].plcp = 0x%x, lq.retry[i].rflags = 0x%x\n", j, tab, rflags);
         linkq.retry[j].plcp = tab;
         linkq.retry[j].rflags = rflags;
         j++;
@@ -5138,6 +5102,37 @@ iwn5000_runtime_calib(struct iwn_softc *sc)
     return iwn_cmd(sc, IWN5000_CMD_CALIB_CONFIG, &cmd, sizeof(cmd), 0);
 }
 
+static uint32_t
+iwn_get_rxon_ht_flags(struct ieee80211com *ic, struct ieee80211_node *ni)
+{
+    uint32_t htflags = 0;
+    if (ni == NULL) {
+        return htflags;
+    }
+    
+    enum ieee80211_htprot htprot =
+        (enum ieee80211_htprot)(ni->ni_htop1 & IEEE80211_HTOP1_PROT_MASK);
+
+    if (ni->ni_chw == IEEE80211_CHAN_WIDTH_40) {
+        switch (htprot) {
+        case IEEE80211_HTPROT_20MHZ:
+            htflags |= IWN_RXON_HT_CHANMODE_PURE40;
+            break;
+        default:
+            htflags |= IWN_RXON_HT_CHANMODE_MIXED2040;
+            break;
+        }
+    }
+    
+    if (ni->ni_chw == IEEE80211_CHAN_WIDTH_40) {
+        if ((ni->ni_htop0 & IEEE80211_HTOP0_SCO_MASK) == IEEE80211_HTOP0_SCO_SCB) {
+            htflags |= IWN_RXON_HT_HT40MINUS;
+        }
+    }
+
+    return htflags;
+}
+
 int ItlIwn::
 iwn_config(struct iwn_softc *sc)
 {
@@ -5650,6 +5645,7 @@ iwn_auth(struct iwn_softc *sc, int arg)
         sc->rxon.cck_mask  = 0x0f;
         sc->rxon.ofdm_mask = 0x15;
     }
+    sc->rxon.flags |= htole32(iwn_get_rxon_ht_flags(ic, ni));
     DPRINTF(("%s: rxon chan %d flags %x cck %x ofdm %x\n", __func__,
         sc->rxon.chan, le32toh(sc->rxon.flags), sc->rxon.cck_mask,
         sc->rxon.ofdm_mask));
@@ -5735,6 +5731,7 @@ iwn_run(struct iwn_softc *sc)
         sc->rxon.flags |= htole32(IWN_RXON_HT_PROTMODE(htprot));
     } else
         sc->rxon.flags &= ~htole32(IWN_RXON_HT_PROTMODE(3));
+    sc->rxon.flags |= htole32(iwn_get_rxon_ht_flags(ic, ni));
 
     if (IEEE80211_IS_CHAN_5GHZ(ni->ni_chan)) {
         /* 11a or 11n 5GHz */
@@ -5815,7 +5812,7 @@ iwn_run(struct iwn_softc *sc)
     sc->calib_cnt = 0;
     timeout_add_msec(&sc->calib_to, 500);
 
-    ieee80211_mira_node_init(&wn->mn);
+    ieee80211_ra_node_init(ic, &wn->rn, &wn->ni);
 
     /* Link LED always on while associated. */
     iwn_set_led(sc, IWN_LED_LINK, 0, 1);
@@ -5884,26 +5881,68 @@ iwn_delete_key(struct ieee80211com *ic, struct ieee80211_node *ni,
     (void)ops->add_node(sc, &node, 1);
 }
 
-/*
- * This function is called by upper layer when HT protection settings in
- * beacons have changed.
- */
 void ItlIwn::
-iwn_update_htprot(struct ieee80211com *ic, struct ieee80211_node *ni)
+iwn_update_chw(struct ieee80211com *ic)
 {
+    XYLog("%s placeholder\n", __FUNCTION__);
+}
+
+void ItlIwn::
+iwn_updateprot(struct ieee80211com *ic)
+{
+    XYLog("%s\n", __FUNCTION__);
     struct iwn_softc *sc = (struct iwn_softc *)ic->ic_softc;
-    struct iwn_ops *ops = &sc->ops;
-    ItlIwn *that = container_of(sc, ItlIwn, com);
     enum ieee80211_htprot htprot;
-    struct iwn_rxon_assoc rxon_assoc;
-    int s, error;
+    
+    if (ic->ic_state != IEEE80211_S_RUN)
+        return;
+    
+    /* Update ERP protection setting. */
+    if (ic->ic_flags & IEEE80211_F_USEPROT)
+        sc->rxon.flags |= htole32(IWN_RXON_TGG_PROT);
+    else
+        sc->rxon.flags &= ~htole32(IWN_RXON_TGG_PROT);
 
     /* Update HT protection mode setting. */
-    htprot = (ieee80211_htprot)((ni->ni_htop1 & IEEE80211_HTOP1_PROT_MASK) >>
+    htprot = (enum ieee80211_htprot)((ic->ic_bss->ni_htop1 & IEEE80211_HTOP1_PROT_MASK) >>
         IEEE80211_HTOP1_PROT_SHIFT);
     sc->rxon.flags &= ~htole32(IWN_RXON_HT_PROTMODE(3));
     sc->rxon.flags |= htole32(IWN_RXON_HT_PROTMODE(htprot));
 
+    iwn_update_rxon(sc);
+}
+
+void ItlIwn::
+iwn_updateslot(struct ieee80211com *ic)
+{
+    XYLog("%s\n", __FUNCTION__);
+    struct iwn_softc *sc = (struct iwn_softc *)ic->ic_softc;
+    
+    if (ic->ic_state != IEEE80211_S_RUN)
+        return;
+    
+    if (ic->ic_flags & IEEE80211_F_SHSLOT)
+        sc->rxon.flags |= htole32(IWN_RXON_SHSLOT);
+    else
+        sc->rxon.flags &= ~htole32(IWN_RXON_SHSLOT);
+    
+    if (ic->ic_flags & IEEE80211_F_SHPREAMBLE)
+        sc->rxon.flags |= htole32(IWN_RXON_SHPREAMBLE);
+    else
+        sc->rxon.flags &= ~htole32(IWN_RXON_SHPREAMBLE);
+    
+    iwn_update_rxon(sc);
+}
+
+void ItlIwn::
+iwn_update_rxon(struct iwn_softc *sc)
+{
+    struct ieee80211com *ic = &sc->sc_ic;
+    ItlIwn *that = container_of(sc, ItlIwn, com);
+    struct iwn_ops *ops = &sc->ops;
+    struct iwn_rxon_assoc rxon_assoc;
+    int s, error;
+    
     /* Update RXON config. */
     memset(&rxon_assoc, 0, sizeof(rxon_assoc));
     rxon_assoc.flags = sc->rxon.flags;
@@ -5915,31 +5954,24 @@ iwn_update_htprot(struct ieee80211com *ic, struct ieee80211_node *ni)
     rxon_assoc.ht_triple_mask = sc->rxon.ht_triple_mask;
     rxon_assoc.rxchain = sc->rxon.rxchain;
     rxon_assoc.acquisition = sc->rxon.acquisition;
-
     s = splnet();
-
     error = that->iwn_cmd(sc, IWN_CMD_RXON_ASSOC, &rxon_assoc,
-        sizeof(rxon_assoc), 1);
+                    sizeof(rxon_assoc), 1);
     if (error != 0)
-        XYLog("%s: RXON_ASSOC command failed\n", sc->sc_dev.dv_xname);
-
+        printf("%s: RXON_ASSOC command failed\n", sc->sc_dev.dv_xname);
     DELAY(100);
-
     /* All RXONs wipe the firmware's txpower table. Restore it. */
     error = ops->set_txpower(sc, 1);
     if (error != 0)
-        XYLog("%s: could not set TX power\n", sc->sc_dev.dv_xname);
-
+        printf("%s: could not set TX power\n", sc->sc_dev.dv_xname);
     DELAY(100);
-
     /* Restore power saving level */
     if (ic->ic_flags & IEEE80211_F_PMGTON)
         error = that->iwn_set_pslevel(sc, 0, 3, 1);
     else
         error = that->iwn_set_pslevel(sc, 0, 0, 1);
     if (error != 0)
-        XYLog("%s: could not set PS level\n", sc->sc_dev.dv_xname);
-
+        printf("%s: could not set PS level\n", sc->sc_dev.dv_xname);
     splx(s);
 }
 

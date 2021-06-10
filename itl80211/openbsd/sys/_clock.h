@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2020  钟先耀
+* Copyright (C) 2021  钟先耀
 *
 * This program is free software; you can redistribute it and/or modify
 * it under the terms of the GNU General Public License as published by
@@ -12,16 +12,19 @@
 * GNU General Public License for more details.
 */
 
-#ifndef ItlDriverController_h
-#define ItlDriverController_h
+#ifndef _clock_h
+#define _clock_h
 
-class ItlDriverController {
-    
-public:
-    
-    virtual void clearScanningFlags() = 0;
-    
-    virtual IOReturn setMulticastList(IOEthernetAddress *addr, int count) = 0;
-};
+#include <sys/time.h>
 
-#endif /* ItlDriverController_h */
+#define hz  100
+#define ticks   \
+({  \
+uint64_t t; \
+uint64_t k;  \
+clock_get_uptime(&t);   \
+absolutetime_to_nanoseconds(t, &k);  \
+(int)((k * hz) / 1000000000);  \
+})
+
+#endif /* _clock_h */

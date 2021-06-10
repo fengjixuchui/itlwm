@@ -80,7 +80,6 @@ public:
     virtual IOWorkLoop* getWorkLoop() const override;
     virtual const OSString * newVendorString() const override;
     virtual const OSString * newModelString() const override;
-    virtual IOReturn getMaxPacketSize(UInt32* maxSize) const override;
     virtual IONetworkInterface * createInterface() override;
     virtual bool setLinkStatus(
                                UInt32                  status,
@@ -154,6 +153,8 @@ public:
     IOReturn setDISASSOCIATE(OSObject *);
     FUNC_IOCTL_GET(RATE_SET, apple80211_rate_set_data)
     FUNC_IOCTL_GET(MCS_INDEX_SET, apple80211_mcs_index_set_data)
+    FUNC_IOCTL_GET(VHT_MCS_INDEX_SET, apple80211_vht_mcs_index_set_data)
+    FUNC_IOCTL(MCS_VHT, apple80211_mcs_vht_data)
     FUNC_IOCTL_GET(SUPPORTED_CHANNELS, apple80211_sup_channel_data)
     FUNC_IOCTL_GET(LOCALE, apple80211_locale_data)
     FUNC_IOCTL(DEAUTH, apple80211_deauth_data)
@@ -176,6 +177,7 @@ public:
     FUNC_IOCTL_SET(SCANCACHE_CLEAR, apple80211req)
     FUNC_IOCTL(TX_NSS, apple80211_tx_nss_data)
     FUNC_IOCTL_GET(NSS, apple80211_nss_data)
+    FUNC_IOCTL_SET(ROAM, apple80211_sta_roam_data);
     
     //AirportVirtualIOCTL
     FUNC_IOCTL(AWDL_PEER_TRAFFIC_REGISTRATION, apple80211_awdl_peer_traffic_registration)

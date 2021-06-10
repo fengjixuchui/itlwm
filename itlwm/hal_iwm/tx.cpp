@@ -245,17 +245,17 @@ iwm_enable_ac_txq(struct iwm_softc *sc, int qid, int fifo)
 {
     XYLog("%s\n", __FUNCTION__);
     iwm_nic_assert_locked(sc);
-
+    
     IWM_WRITE(sc, IWM_HBUS_TARG_WRPTR, qid << 8 | 0);
-
+    
     iwm_write_prph(sc, IWM_SCD_QUEUE_STATUS_BITS(qid),
                    (0 << IWM_SCD_QUEUE_STTS_REG_POS_ACTIVE)
                    | (1 << IWM_SCD_QUEUE_STTS_REG_POS_SCD_ACT_EN));
-
+    
     iwm_clear_bits_prph(sc, IWM_SCD_AGGR_SEL, (1 << qid));
-
+    
     iwm_write_prph(sc, IWM_SCD_QUEUE_RDPTR(qid), 0);
-
+    
     iwm_write_mem32(sc,
                     sc->sched_base + IWM_SCD_CONTEXT_QUEUE_OFFSET(qid), 0);
     

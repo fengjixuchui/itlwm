@@ -130,6 +130,13 @@ iwm_is_mimo_ht_plcp(uint8_t ht_plcp)
 }
 
 int ItlIwm::
+iwm_is_mimo_vht_plcp(uint8_t ht_plcp)
+{
+    return (ht_plcp != IWM_RATE_VHT_SISO_MCS_INV_PLCP &&
+            (ht_plcp & IWM_RATE_VHT_MCS_NSS_MSK));
+}
+
+int ItlIwm::
 iwm_is_mimo_mcs(int mcs)
 {
     int ridx = iwm_mcs2ridx[mcs];
@@ -469,8 +476,8 @@ iwm_read_firmware(struct iwm_softc *sc, enum iwm_ucode_type ucode_type)
                 }
                 paging_mem_size = le32toh(*(const uint32_t *)tlv_data);
                 
-                XYLog("%s: Paging: paging enabled (size = %u bytes)\n",
-                      DEVNAME(sc), paging_mem_size);
+                DPRINTF(("%s: Paging: paging enabled (size = %u bytes)\n",
+                      DEVNAME(sc), paging_mem_size));
                 if (paging_mem_size > IWM_MAX_PAGING_IMAGE_SIZE) {
                     XYLog("%s: Driver only supports up to %u"
                           " bytes for paging image (%u requested)\n",
@@ -679,6 +686,21 @@ iwm_fw_valid_rx_ant(struct iwm_softc *sc)
         rx_ant &= sc->sc_nvm.valid_rx_ant;
     
     return rx_ant;
+}
+
+void ItlIwm::
+iwm_toggle_tx_ant(struct iwm_softc *sc, uint8_t *ant)
+{
+    int i;
+    uint8_t ind = *ant;
+    uint8_t valid = iwm_fw_valid_tx_ant(sc);
+    for (i = 0; i < IWM_RATE_MCS_ANT_NUM; i++) {
+        ind = (ind + 1) % IWM_RATE_MCS_ANT_NUM;
+        if (valid & (1 << ind))
+            break;
+    }
+    
+    *ant = ind;
 }
 
 int ItlIwm::

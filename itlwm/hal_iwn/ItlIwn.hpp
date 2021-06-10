@@ -110,6 +110,8 @@ public:
     //driver controller
     virtual void clearScanningFlags() override;
     
+    virtual IOReturn setMulticastList(IOEthernetAddress *addr, int count) override;
+    
     void releaseAll();
     void joinSSID(const char *ssid, const char *pwd);
     
@@ -166,9 +168,11 @@ public:
                 struct iwn_rx_data *);
     void        iwn_rx_done(struct iwn_softc *, struct iwn_rx_desc *,
                 struct iwn_rx_data *, struct mbuf_list *);
-    void        iwn_mira_choose(struct iwn_softc *, struct ieee80211_node *);
+    void        iwn_ra_choose(struct iwn_softc *, struct ieee80211_node *);
     void        iwn_ampdu_rate_control(struct iwn_softc *, struct ieee80211_node *,
-                struct iwn_tx_ring *, int, uint16_t, uint16_t);
+                struct iwn_tx_ring *, uint16_t, uint16_t);
+    void        iwn_ht_single_rate_control(struct iwn_softc *,
+                struct ieee80211_node *, uint8_t, uint8_t, uint8_t, int);
     void        iwn_rx_compressed_ba(struct iwn_softc *, struct iwn_rx_desc *,
                 struct iwn_rx_data *);
     void        iwn5000_rx_calib_results(struct iwn_softc *,
@@ -188,7 +192,7 @@ public:
                 struct iwn_tx_data *);
     void        iwn_clear_oactive(struct iwn_softc *, struct iwn_tx_ring *);
     void        iwn_tx_done(struct iwn_softc *, struct iwn_rx_desc *,
-                uint8_t, uint8_t, int, int, uint16_t);
+                uint8_t, uint8_t, uint8_t, int, int, uint16_t);
     void        iwn_cmd_done(struct iwn_softc *, struct iwn_rx_desc *);
     void        iwn_notif_intr(struct iwn_softc *);
     void        iwn_wakeup_intr(struct iwn_softc *);
@@ -254,8 +258,9 @@ public:
                 struct ieee80211_key *);
     static void        iwn_delete_key(struct ieee80211com *, struct ieee80211_node *,
                 struct ieee80211_key *);
-    static void        iwn_update_htprot(struct ieee80211com *,
-                struct ieee80211_node *);
+    static void        iwn_updateprot(struct ieee80211com *);
+    static void        iwn_updateslot(struct ieee80211com *);
+    static void        iwn_update_rxon(struct iwn_softc *);
     static int        iwn_ampdu_rx_start(struct ieee80211com *,
                 struct ieee80211_node *, uint8_t);
     static void        iwn_ampdu_rx_stop(struct ieee80211com *,
@@ -272,6 +277,7 @@ public:
                 struct ieee80211_node *, uint8_t, uint16_t);
     static void        iwn5000_ampdu_tx_stop(struct iwn_softc *,
                 uint8_t, uint16_t);
+    static void        iwn_update_chw(struct ieee80211com *);
     static int        iwn5000_query_calibration(struct iwn_softc *);
     static int        iwn5000_send_calibration(struct iwn_softc *);
     static int        iwn5000_send_wimax_coex(struct iwn_softc *);

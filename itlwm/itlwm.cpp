@@ -567,7 +567,8 @@ setLinkStatus(UInt32 status, const IONetworkMedium * activeMedium, UInt64 speed,
     return ret;
 }
 
-IOReturn itlwm::getHardwareAddress(IOEthernetAddress *addrP) {
+IOReturn itlwm::getHardwareAddress(IOEthernetAddress *addrP)
+{
     if (IEEE80211_ADDR_EQ(etheranyaddr, fHalService->get80211Controller()->ic_myaddr)) {
         return kIOReturnError;
     } else {
@@ -590,42 +591,44 @@ IOReturn itlwm::outputStart(IONetworkInterface *interface, IOOptionBits options)
             return kIOReturnNoResources;
         }
     }
-    return kIOReturnNoResources;
+    return kIOReturnSuccess;
 }
 #endif
 
 UInt32 itlwm::outputPacket(mbuf_t m, void *param)
 {
 //    XYLog("%s\n", __FUNCTION__);
+    IOReturn ret = kIOReturnOutputSuccess;
     _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
-    
-    if (fHalService->get80211Controller()->ic_state != IEEE80211_S_RUN || ifp == NULL || ifp->if_snd == NULL) {
-        freePacket(m);
+
+    if (fHalService->get80211Controller()->ic_state != IEEE80211_S_RUN || ifp->if_snd == NULL) {
+        if (m && mbuf_type(m) != MBUF_TYPE_FREE) {
+            freePacket(m);
+        }
         return kIOReturnOutputDropped;
     }
     if (m == NULL) {
         XYLog("%s m==NULL!!\n", __FUNCTION__);
         ifp->netStat->outputErrors++;
-        return kIOReturnOutputDropped;
+        ret = kIOReturnOutputDropped;
     }
     if (!(mbuf_flags(m) & MBUF_PKTHDR) ){
         XYLog("%s pkthdr is NULL!!\n", __FUNCTION__);
         ifp->netStat->outputErrors++;
         freePacket(m);
-        return kIOReturnOutputDropped;
+        ret = kIOReturnOutputDropped;
     }
     if (mbuf_type(m) == MBUF_TYPE_FREE) {
         XYLog("%s mbuf is FREE!!\n", __FUNCTION__);
         ifp->netStat->outputErrors++;
-        return kIOReturnOutputDropped;
+        ret = kIOReturnOutputDropped;
     }
-    if (ifp->if_snd->lockEnqueue(m)) {
-        (*ifp->if_start)(ifp);
-        return kIOReturnOutputSuccess;
-    } else {
+    if (!ifp->if_snd->lockEnqueue(m)) {
         freePacket(m);
-        return kIOReturnOutputDropped;
+        ret = kIOReturnOutputDropped;
     }
+    (*ifp->if_start)(ifp);
+    return ret;
 }
 
 UInt32 itlwm::getFeatures() const
@@ -633,34 +636,32 @@ UInt32 itlwm::getFeatures() const
     return fHalService->getDriverInfo()->supportedFeatures();
 }
 
-IOReturn itlwm::setPromiscuousMode(IOEnetPromiscuousMode mode) {
+IOReturn itlwm::setPromiscuousMode(IOEnetPromiscuousMode mode)
+{
     return kIOReturnSuccess;
 }
 
-IOReturn itlwm::setMulticastMode(IOEnetMulticastMode mode) {
+IOReturn itlwm::setMulticastMode(IOEnetMulticastMode mode)
+{
     return kIOReturnSuccess;
 }
 
-IOReturn itlwm::setMulticastList(IOEthernetAddress* addr, UInt32 len) {
-    return kIOReturnSuccess;
+IOReturn itlwm::setMulticastList(IOEthernetAddress* addr, UInt32 len)
+{
+    return fHalService->getDriverController()->setMulticastList(addr, len);
 }
 
-IOReturn itlwm::getPacketFilters(const OSSymbol *group, UInt32 *filters) const {
+IOReturn itlwm::getPacketFilters(const OSSymbol *group, UInt32 *filters) const
+{
     IOReturn    rtn = kIOReturnSuccess;
     if (group == gIOEthernetWakeOnLANFilterGroup && magicPacketSupported) {
         *filters = kIOEthernetWakeOnMagicPacket;
     } else if (group == gIONetworkFilterGroup) {
-        *filters = kIOPacketFilterUnicast | kIOPacketFilterBroadcast
-        | kIOPacketFilterPromiscuous | kIOPacketFilterMulticast
-        | kIOPacketFilterMulticastAll;
+        *filters = kIOPacketFilterMulticast | kIOPacketFilterPromiscuous;
     } else {
         rtn = IOEthernetController::getPacketFilters(group, filters);
     }
     return rtn;
-}
-
-IOReturn itlwm::getMaxPacketSize(UInt32 *maxSize) const {
-    return super::getMaxPacketSize(maxSize);
 }
 
 IOReturn itlwm::

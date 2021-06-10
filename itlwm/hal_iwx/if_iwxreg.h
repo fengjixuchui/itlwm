@@ -236,8 +236,6 @@ struct iwx_context_info {
     uint32_t reserved3[16];
 } __packed;
 
-#define IWX_MGMT_TID        15
-
 #define IWX_MQ_RX_TABLE_SIZE    512
 
 /* cb size is the exponent */
@@ -3098,11 +3096,23 @@ struct iwx_rx_mpdu_res_start {
 #define    IWX_RX_MPDU_MFLG2_PAD            0x20
 #define IWX_RX_MPDU_MFLG2_AMSDU            0x40
 
+#define IWX_RX_MPDU_AMSDU_SUBFRAME_IDX_MASK    0x7f
+#define IWX_RX_MPDU_AMSDU_LAST_SUBFRAME        0x80
+
 #define IWX_RX_MPDU_PHY_AMPDU            (1 << 5)
 #define IWX_RX_MPDU_PHY_AMPDU_TOGGLE        (1 << 6)
 #define IWX_RX_MPDU_PHY_SHORT_PREAMBLE        (1 << 7)
 #define IWX_RX_MPDU_PHY_NCCK_ADDTL_NTFY        (1 << 7)
 #define IWX_RX_MPDU_PHY_TSF_OVERLOAD        (1 << 8)
+
+#define IWX_RX_REORDER_DATA_INVALID_BAID    0x7f
+
+#define IWX_RX_MPDU_REORDER_NSSN_MASK        0x00000fff
+#define IWX_RX_MPDU_REORDER_SN_MASK        0x00fff000
+#define IWX_RX_MPDU_REORDER_SN_SHIFT        12
+#define IWX_RX_MPDU_REORDER_BAID_MASK        0x7f000000
+#define IWX_RX_MPDU_REORDER_BAID_SHIFT        24
+#define IWX_RX_MPDU_REORDER_BA_OLD_SN        0x80000000
 
 struct iwx_rx_mpdu_desc_v1 {
     union {
@@ -3781,6 +3791,8 @@ struct iwx_mac_data_p2p_dev {
 #define IWX_MAC_FILTER_IN_CRC32            (1 << 11)
 #define IWX_MAC_FILTER_IN_PROBE_REQUEST        (1 << 12)
 
+#define IWX_MAC_FILTER_IN_11AX          (1 << 14)
+
 /**
  * QoS flags
  * @IWX_MAC_QOS_FLG_UPDATE_EDCA: ?
@@ -4214,7 +4226,7 @@ struct iwx_beacon_filter_cmd {
 #define IWX_RATE_VHT_MIMO2_MCS_7_PLCP    0x17
 #define IWX_RATE_VHT_MIMO2_MCS_8_PLCP    0x18
 #define IWX_RATE_VHT_MIMO2_MCS_9_PLCP    0x19
-#define IWX_RATE_HT_SISO_MCS_INV_PLCP    0x20
+#define IWX_RATE_HT_SISO_MCS_INV_PLCP    0x1A
 #define IWX_RATE_HT_MIMO2_MCS_INV_PLCP    IWX_RATE_HT_SISO_MCS_INV_PLCP
 #define IWX_RATE_VHT_SISO_MCS_INV_PLCP    IWX_RATE_HT_SISO_MCS_INV_PLCP
 #define IWX_RATE_VHT_MIMO2_MCS_INV_PLCP    IWX_RATE_HT_SISO_MCS_INV_PLCP
@@ -4313,6 +4325,9 @@ enum {
 #define IWX_RATE_MCS_VHT_POS 26
 #define IWX_RATE_MCS_VHT_MSK (1 << IWX_RATE_MCS_VHT_POS)
 
+/* Bit 10 - OFDM HE */
+#define IWX_RATE_MCS_HE_POS        10
+#define IWX_RATE_MCS_HE_MSK        (1 << IWX_RATE_MCS_HE_POS)
 
 /*
  * High-throughput (HT) rate format for bits 7:0
@@ -4627,13 +4642,17 @@ struct iwx_tlc_update_notif {
 } __packed; /* TLC_MNG_UPDATE_NTFY_API_S_VER_2 */
 
 /* Antenna flags. */
+#define IWX_ANT_NONE    0x0
+#define IWX_ANT_INVALID    0xff
 #define IWX_ANT_A    (1 << 0)
 #define IWX_ANT_B    (1 << 1)
 #define IWX_ANT_C    (1 << 2)
 /* Shortcuts. */
 #define IWX_ANT_AB    (IWX_ANT_A | IWX_ANT_B)
+#define IWX_ANT_AC    (IWX_ANT_A | IWX_ANT_C)
 #define IWX_ANT_BC    (IWX_ANT_B | IWX_ANT_C)
 #define IWX_ANT_ABC    (IWX_ANT_A | IWX_ANT_B | IWX_ANT_C)
+#define IWX_MAX_ANT_NUM 3
 
 /**
  * bitmasks for tx_flags in TX command
@@ -4740,10 +4759,15 @@ struct iwx_tlc_update_notif {
 #define IWX_TX_CMD_LIFE_TIME_PROBE_RESP    40000 /* 40 ms */
 #define IWX_TX_CMD_LIFE_TIME_EXPIRED_FRAME    0
 
+#define IWX_MAX_TID_COUNT    8
+
 /*
  * TID for non QoS frames - to be written in tid_tspec
  */
 #define IWX_TID_NON_QOS    0
+#define IWX_MGMT_TID       15
+
+#define IWX_QID_MGMT       EDCA_AC_BE + IWX_DQA_AUX_QUEUE + 1
 
 /*
  * Limits on the retransmissions - to be written in {data,rts}_retry_limit
@@ -6046,6 +6070,8 @@ struct iwx_umac_scan_iter_complete_notif {
 #define IWX_STA_FLG_MAX_AGG_SIZE_512K    (6 << IWX_STA_FLG_MAX_AGG_SIZE_SHIFT)
 #define IWX_STA_FLG_MAX_AGG_SIZE_1024K    (7 << IWX_STA_FLG_MAX_AGG_SIZE_SHIFT)
 #define IWX_STA_FLG_MAX_AGG_SIZE_MSK    (7 << IWX_STA_FLG_MAX_AGG_SIZE_SHIFT)
+
+#define IWX_STA_FLG_MAX_AGG_SIZE_4M     (9 << IWX_STA_FLG_MAX_AGG_SIZE_SHIFT)
 
 #define IWX_STA_FLG_AGG_MPDU_DENS_SHIFT    23
 #define IWX_STA_FLG_AGG_MPDU_DENS_2US    (4 << IWX_STA_FLG_AGG_MPDU_DENS_SHIFT)

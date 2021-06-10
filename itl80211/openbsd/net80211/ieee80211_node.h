@@ -76,7 +76,15 @@ extern const struct ieee80211_rateset ieee80211_std_rateset_11g;
 #define IEEE80211_HT_RATESET_MIMO3_SGI	5
 #define IEEE80211_HT_RATESET_MIMO4	6
 #define IEEE80211_HT_RATESET_MIMO4_SGI	7
-#define IEEE80211_HT_NUM_RATESETS	8
+#define IEEE80211_HT_RATESET_CBW40_SISO    8
+#define IEEE80211_HT_RATESET_CBW40_SISO_SGI    9
+#define IEEE80211_HT_RATESET_CBW40_MIMO2    10
+#define IEEE80211_HT_RATESET_CBW40_MIMO2_SGI    11
+#define IEEE80211_HT_RATESET_CBW40_MIMO3    12
+#define IEEE80211_HT_RATESET_CBW40_MIMO3_SGI    13
+#define IEEE80211_HT_RATESET_CBW40_MIMO4    14
+#define IEEE80211_HT_RATESET_CBW40_MIMO4_SGI    15
+#define IEEE80211_HT_NUM_RATESETS    16
 
 /* Maximum number of rates in a HT rateset. */
 #define IEEE80211_HT_RATESET_MAX_NRATES	8
@@ -117,7 +125,11 @@ extern const struct ieee80211_ht_rateset ieee80211_std_ratesets_11n[];
 #define IEEE80211_VHT_RATESET_SISO_80_SGI	9
 #define IEEE80211_VHT_RATESET_MIMO2_80		10
 #define IEEE80211_VHT_RATESET_MIMO2_80_SGI	11
-#define IEEE80211_VHT_NUM_RATESETS		12
+#define IEEE80211_VHT_RATESET_SISO_160      12
+#define IEEE80211_VHT_RATESET_SISO_160_SGI  13
+#define IEEE80211_VHT_RATESET_MIMO2_160     14
+#define IEEE80211_VHT_RATESET_MIMO2_160_SGI 15
+#define IEEE80211_VHT_NUM_RATESETS		16
 
 /* Maximum number of rates in a HT rateset. */
 #define IEEE80211_VHT_RATESET_MAX_NRATES	10
@@ -133,6 +145,29 @@ struct ieee80211_vht_rateset {
 };
 
 extern const struct ieee80211_vht_rateset ieee80211_std_ratesets_11ac[];
+
+#define IEEE80211_HE_RATESET_SISO        0
+#define IEEE80211_HE_RATESET_MIMO2        1
+#define IEEE80211_HE_RATESET_SISO_40        2
+#define IEEE80211_HE_RATESET_MIMO2_40        3
+#define IEEE80211_HE_RATESET_SISO_80        4
+#define IEEE80211_HE_RATESET_MIMO2_80        5
+#define IEEE80211_HE_RATESET_SISO_160      6
+#define IEEE80211_HE_RATESET_MIMO2_160     7
+#define IEEE80211_HE_NUM_RATESETS        8
+
+/* Maximum number of rates in a HT rateset. */
+#define IEEE80211_HE_RATESET_MAX_NRATES    12
+
+struct ieee80211_he_rateset {
+    uint32_t nrates;
+    uint32_t rates[IEEE80211_HE_RATESET_MAX_NRATES]; /* 500 kbit/s units */
+
+    /* Number of spatial streams used by rates in this rateset. */
+    int num_ss;
+};
+
+extern const struct ieee80211_he_rateset ieee80211_std_ratesets_11ax[];
 
 enum ieee80211_node_state {
 	IEEE80211_STA_CACHE,	/* cached node */
@@ -197,6 +232,8 @@ struct ieee80211_rxinfo {
 };
 #define IEEE80211_RXI_HWDEC		0x00000001
 #define IEEE80211_RXI_AMPDU_DONE	0x00000002
+#define IEEE80211_RXI_HWDEC_SAME_PN    0x00000004
+#define IEEE80211_RXI_SAME_SEQ         0x00000008
 
 /* Block Acknowledgement Record */
 struct ieee80211_tx_ba {
@@ -292,6 +329,9 @@ struct ieee80211_node {
 	u_int8_t		*ni_country;	/* country information XXX */
 	struct ieee80211_channel *ni_chan;
 	u_int8_t		ni_erp;		/* 11g only */
+#ifdef AIRPORT
+    u_int64_t       ni_age_ts;
+#endif
 
 	/* DTIM and contention free period (CFP) */
 	u_int8_t		ni_dtimcount;
@@ -349,26 +389,22 @@ struct ieee80211_node {
 	uint8_t			ni_rxmcs[howmany(80,NBBY)];
 	uint16_t		ni_max_rxrate;	/* in Mb/s, 0 <= rate <= 1023 */
 	uint8_t			ni_tx_mcs_set;
-	uint16_t		ni_htxcaps;
+	uint16_t		ni_htxcaps;// extended_ht_cap_info
 	uint32_t		ni_txbfcaps;
-	uint8_t			ni_aselcaps;
+	uint8_t			ni_aselcaps;// antenna_selection_info
 
 	/* HT operation */
 	uint8_t			ni_primary_chan; /* XXX corresponds to ni_chan */
-	uint8_t			ni_htop0;
-	uint16_t		ni_htop1;
-	uint16_t		ni_htop2;
+	uint8_t			ni_htop0;// ht_param
+	uint16_t		ni_htop1;// operation_mode
+	uint16_t		ni_htop2;// stbc_param
 	uint8_t			ni_basic_mcs[howmany(128,NBBY)];
-    
-    ///added
-    uint8_t            ni_htparam;    /* HT params */
-    uint8_t            ni_htctlchan;    /* HT control channel */
+
     uint8_t            ni_ht2ndchan;    /* HT 2nd channel */
-    uint8_t            ni_htopmode;    /* HT operating mode */
     uint8_t            ni_chw;        /* negotiated channel width */
     
     /* VHT state */
-    uint32_t        ni_vhtcap;
+    uint32_t        ni_vhtcaps;
     uint16_t        ni_vht_basicmcs;
     uint16_t        ni_vht_pad2;
     struct ieee80211_vht_mcs_info    ni_vht_mcsinfo;
@@ -377,8 +413,14 @@ struct ieee80211_node {
     uint8_t            ni_vht_chanwidth;    /* IEEE80211_VHT_CHANWIDTH_ */
     uint8_t            ni_vht_pad1;
     uint32_t        ni_vht_spare[8];
-    ///end
-
+    
+    /* HE state */
+    struct ieee80211_he_cap_elem ni_he_cap_elem;   /* Fixed portion of the HE capabilities element. */
+    struct ieee80211_he_mcs_nss_supp ni_he_mcs_nss_supp;   /* The supported NSS/MCS combinations. */
+    uint8_t ni_ppe_thres[IEEE80211_HE_PPE_THRES_MAX_LEN]; /* Holds the PPE Thresholds data. */
+    uint32_t        ni_he_oper_params;
+    uint16_t        ni_he_oper_nss_set;
+    
 	/* Timeout handlers which trigger Tx Block Ack negotiation. */
 	CTimeout*		ni_addba_req_to[IEEE80211_NUM_TID];
 	int			ni_addba_req_intval[IEEE80211_NUM_TID];
@@ -390,6 +432,8 @@ struct ieee80211_node {
 
 	int			ni_txmcs;	/* current MCS used for TX */
 	int			ni_vht_ss;	/* VHT # spatial streams */
+    
+    uint8_t     ni_rx_nss;
 
 	/* others */
 	u_int16_t		ni_associd;	/* assoc response */
@@ -433,6 +477,10 @@ struct ieee80211_node {
 #define IEEE80211_NODE_HT_SGI40		0x8000	/* SGI on 40 MHz negotiated */ 
 #define IEEE80211_NODE_VHT		0x10000	/* VHT negotiated */
 #define IEEE80211_NODE_HTCAP		0x20000	/* claims to support HT */
+#define IEEE80211_NODE_VHTCAP       0x40000 /* claims to support VHT */
+#define IEEE80211_NODE_VHT_SGI80    0x80000    /* SGI on 20 MHz negotiated */ 
+#define IEEE80211_NODE_VHT_SGI160   0x100000    /* SGI on 40 MHz negotiated */
+#define IEEE80211_NODE_HE       0x200000    /* HE negotiated */
 
 	/* If not NULL, this function gets called when ni_refcnt hits zero. */
 	void			(*ni_unref_cb)(struct ieee80211com *,
@@ -459,14 +507,23 @@ RB_HEAD(ieee80211_ess_tree, ieee80211_ess_rbt);
 static inline void
 ieee80211_node_incref(struct ieee80211_node *ni)
 {
-    OSIncrementAtomic(&((ni)->ni_refcnt));
+    int        s;
+
+    s = splnet();
+    ni->ni_refcnt++;
+    splx(s);
 }
 
 static inline u_int
 ieee80211_node_decref(struct ieee80211_node *ni)
 {
-	OSDecrementAtomic(&ni->ni_refcnt);
-    return ni->ni_refcnt;
+    u_int        refcnt;
+    int         s;
+
+    s = splnet();
+    refcnt = --ni->ni_refcnt;
+    splx(s);
+    return refcnt;
 }
 
 static inline struct ieee80211_node *
@@ -495,6 +552,13 @@ ieee80211_node_supports_ht(struct ieee80211_node *ni)
 	    ni->ni_rxmcs[0] & 0xff);
 }
 
+static inline int
+ieee80211_node_supports_vht(struct ieee80211_node *ni)
+{
+    return ((ni->ni_flags & IEEE80211_NODE_VHTCAP) &&
+        ni->ni_vht_mcsinfo.rx_mcs_map & 0xff);
+}
+
 /* Check if the peer supports HT short guard interval (SGI) on 20 MHz. */
 static inline int
 ieee80211_node_supports_ht_sgi20(struct ieee80211_node *ni)
@@ -509,6 +573,20 @@ ieee80211_node_supports_ht_sgi40(struct ieee80211_node *ni)
 {
 	return ieee80211_node_supports_ht(ni) &&
 	    (ni->ni_htcaps & IEEE80211_HTCAP_SGI40);
+}
+
+static inline int
+ieee80211_node_supports_vht_sgi80(struct ieee80211_node *ni)
+{
+    return ieee80211_node_supports_vht(ni) &&
+        (ni->ni_vhtcaps & IEEE80211_VHTCAP_SHORT_GI_80);
+}
+
+static inline int
+ieee80211_node_supports_vht_sgi160(struct ieee80211_node *ni)
+{
+    return ieee80211_node_supports_vht(ni) &&
+        (ni->ni_vhtcaps & IEEE80211_VHTCAP_SHORT_GI_160);
 }
 
 struct ieee80211com;
@@ -552,6 +630,10 @@ void ieee80211_setup_htcaps(struct ieee80211_node *, const uint8_t *,
 void ieee80211_clear_htcaps(struct ieee80211_node *);
 int ieee80211_setup_htop(struct ieee80211_node *, const uint8_t *,
     uint8_t, int);
+void ieee80211_setup_hecaps(struct ieee80211_node *, const uint8_t *,
+                           uint8_t);
+int ieee80211_setup_heop(struct ieee80211_node *, const uint8_t *,
+    uint8_t);
 int ieee80211_setup_rates(struct ieee80211com *,
 	    struct ieee80211_node *, const u_int8_t *, const u_int8_t *, int);
 void ieee80211_node_trigger_addba_req(struct ieee80211_node *, int);
